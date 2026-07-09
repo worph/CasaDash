@@ -1,0 +1,9 @@
+web/node_modules
+internal/ui/dist
+.git
+*.log
+casadash
+# Runtime data folder (host bind mount) — never part of the build context.
+DATA
+storehost
+.env

@@ -1,0 +1,59 @@
+/*
+ * CasaDash design tokens — ported verbatim from CasaOS-UI SCSS variables so the
+ * dashboard reads as CasaOS. Source: casa-img/CasaOS-UI/src/assets/scss/common/
+ * _variables.scss + _others.scss (.blur-background).
+ */
+:root {
+  /* Brand / semantic */
+  --casablue: hsl(216, 90%, 54%);
+  --blue: hsla(208, 100%, 45%, 1);
+  --green: hsla(118, 70%, 45%, 1);
+  --orange: hsl(14, 100%, 53%);
+  --yellow: hsl(48, 100%, 67%);
+  --red: hsl(348, 100%, 61%);
+  --turquoise: hsl(171, 100%, 41%);
+  --purple: hsl(271, 100%, 71%);
+  --cyan: hsl(204, 86%, 53%);
+  --primary: var(--casablue);
+
+  /* CasaOS greys (text on dark glass) */
+  --grey-100: hsla(208, 16%, 96%, 1);
+  --grey-200: hsla(208, 16%, 94%, 1);
+  --grey-300: hsla(208, 16%, 91%, 1);
+  --grey-400: hsla(208, 16%, 85%, 1);
+  --grey-600: hsla(208, 14%, 58%, 1);
+  --grey-800: hsla(208, 20%, 20%, 1);
+  --grey-font: rgba(144, 149, 153, 1);
+
+  /* Status dots */
+  --status-running: #779e2a;
+  --status-exited: #ff1616;
+
+  /* Frosted glass (the single most load-bearing visual) */
+  --glass-color: rgba(53, 54, 58, 0.4);
+  --glass-blur: blur(5px) saturate(180%);
+  --glass-radius: 10px;
+  --glass-shadow: rgb(255 255 255 / 12.5%) 0.5px 1px 1px 0px inset;
+
+  /* Radii */
+  --radius-card: 10px;
+  --radius-icon: 11.5px;
+  --radius-thumb: 4px;
+
+  /* Typography */
+  --font-sans: BrittiSans, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    "Helvetica Neue", "Noto Sans", "Noto Sans CJK SC", "Microsoft YaHei",
+    "PingFang SC", sans-serif;
+  --font-base: 0.875rem;
+
+  /* Layout */
+  --sidebar-min: 18rem;
+  --grid-gap: 1rem;
+}
+
+@font-face {
+  font-family: BrittiSans;
+  font-display: swap;
+  src: url("/fonts/britti-sans-regular.woff") format("woff");
+  font-weight: 400;
+}

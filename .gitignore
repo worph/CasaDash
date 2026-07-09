@@ -1,0 +1,24 @@
+# Go
+/casadash
+/dist
+*.test
+*.out
+
+# Frontend
+web/node_modules/
+web/.svelte-kit/
+
+# Embedded build output (produced by `vite build`)
+/internal/ui/dist/*
+!/internal/ui/dist/index.html
+
+# Local, machine-specific config (keep .env.example tracked)
+.env
+
+# Runtime data folder (host bind mount)
+/DATA/
+
+# Misc
+*.log
+.DS_Store
+CLAUDE.md

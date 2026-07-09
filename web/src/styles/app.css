@@ -1,0 +1,56 @@
+/* Base app styles + the reusable .glass surface. */
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  font-family: var(--font-sans);
+  font-size: var(--font-base);
+  font-weight: 400;
+  color: var(--grey-100);
+  -webkit-font-smoothing: antialiased;
+  background: #000;
+}
+
+#app {
+  height: 100%;
+}
+
+/* Frosted-glass surface used by every widget and tile. Place as an absolutely
+   positioned layer behind z-indexed content, matching CasaOS `.blur-background`. */
+.glass {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  width: 100%;
+  height: 100%;
+  background-color: var(--glass-color);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border-radius: var(--glass-radius);
+  box-shadow: var(--glass-shadow);
+  overflow: hidden;
+}
+
+/* When a modal is open we drop the (expensive) blur on background cards, like CasaOS. */
+body.modal-open .glass {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.one-line {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
