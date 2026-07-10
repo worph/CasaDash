@@ -1,0 +1,54 @@
+# Dex configuration — CasaDash DEV.
+#
+# This is a hand-maintained DEV copy. In production (template-root) this file is
+# rendered from dex.config.yaml.tmpl by scripts/self-check/ensure-dex.sh and the
+# identity source is the casaos-oidc-bridge connector, which federates login to
+# CasaOS's /v1/users/login API.
+#
+# CasaDash has NO auth and NO login API, so that bridge cannot federate to it.
+# For local testing we instead use Dex's built-in local password DB with a single
+# seeded test user (see staticPasswords below). This is the only intended
+# difference from prod — every other moving part (issuer shape, gRPC client
+# registration, Caddy routing) matches.
+#
+# NOTE: issuer is baked in here. If you change DOMAIN in .env.dev away from
+# `app.localhost`, update the issuer line below to match `https://auth-<DOMAIN>`.
+
+issuer: https://auth-app.localhost
+
+storage:
+  type: sqlite3
+  config:
+    file: /data/dex.db
+
+# Caddy terminates TLS at auth-<DOMAIN> and reverse-proxies to this HTTP port.
+web:
+  http: 0.0.0.0:5556
+
+# Client-management gRPC API. auth-registrar (mesh-auth, REGISTRAR_BACKEND=dex)
+# calls CreateClient here when a PCS app first logs in. UNAUTHENTICATED, so it is
+# bound to the isolated dex-internal network's static IP ONLY. The IP is pinned
+# in docker-compose.dev.yml — keep the two in sync.
+grpc:
+  addr: 172.31.7.2:5557
+
+oauth2:
+  # Every PCS app is first-party; skip the per-app consent screen.
+  skipApprovalScreen: true
+
+# Backs the local password connector (the test user below).
+enablePasswordDB: true
+
+# --- DEV identity source -----------------------------------------------------
+# Single seeded test user. Log in with these at any SSO-enabled app.
+#   email:    test@casadash.local
+#   password: casadash
+# hash is bcrypt (Go-compatible $2a$) of "casadash".
+staticPasswords:
+  - email: "test@casadash.local"
+    hash: "$2a$10$ivrjUPjYMf4HF./kGxx7/e/WjJxITZqz0ESBOI21BrdCpjid9Y3QS"
+    username: test
+    userID: "00000000-0000-0000-0000-000000000001"
+
+# Application clients are NOT defined statically — auth-registrar registers them
+# dynamically over Dex's gRPC API as each app first logs in.

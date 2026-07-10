@@ -14,6 +14,8 @@ export interface App {
   port?: string
   index?: string
   category?: string
+  /** Fully-resolved click URL from x-compose-app (webui-*); wins when set. */
+  url?: string
 }
 
 export const apps = writable<App[]>([])
@@ -63,6 +65,8 @@ export async function setConfig(id: string, override: string): Promise<void> {
 
 /** Compute an app's web URL, if it has a reachable one. */
 export function appUrl(a: App): string {
+  // x-compose-app (webui-*) resolves the full URL server-side; use it verbatim.
+  if (a.url) return a.url
   const scheme = a.scheme || 'http'
   const index = a.index && a.index !== '/' ? a.index : ''
   if (a.hostname) return `${scheme}://${a.hostname}${index}`

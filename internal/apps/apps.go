@@ -17,6 +17,7 @@ import (
 	"github.com/yundera/casadash/internal/config"
 	"github.com/yundera/casadash/internal/dockerx"
 	"github.com/yundera/casadash/internal/xcasaos"
+	"github.com/yundera/casadash/internal/xcomposeapp"
 )
 
 // Status values for an app tile.
@@ -39,6 +40,10 @@ type App struct {
 	Port     string `json:"port,omitempty"`
 	Index    string `json:"index,omitempty"`
 	Category string `json:"category,omitempty"`
+	// URL is a fully-resolved click URL, set when x-compose-app declares one
+	// (webui-*). When empty, the frontend derives the URL from the legacy
+	// scheme/hostname/port/index fields.
+	URL string `json:"url,omitempty"`
 }
 
 // Registry reconciles on-disk projects with Docker state.
@@ -87,12 +92,12 @@ func (r *Registry) List(ctx context.Context) ([]App, error) {
 
 	for name, ps := range projects {
 		managed := r.isManaged(name)
-		si := r.storeInfoFor(name, ps.workingDir)
-		if si == nil && !managed {
-			// A non-CasaDash stack without x-casaos metadata: not our concern.
+		si, ca := r.metaFor(name, ps.workingDir)
+		if si == nil && ca == nil && !managed {
+			// A non-CasaDash stack without any recognised metadata: not our concern.
 			continue
 		}
-		out = append(out, buildApp(name, si, managed, statusOf(ps.running, ps.total), ps.svcPorts))
+		out = append(out, buildApp(name, si, ca, r.cfg.RefDomain, managed, statusOf(ps.running, ps.total), ps.svcPorts))
 		seen[name] = true
 	}
 
@@ -101,8 +106,8 @@ func (r *Registry) List(ctx context.Context) ([]App, error) {
 		if seen[name] {
 			continue
 		}
-		si := r.storeInfoFor(name, "")
-		out = append(out, buildApp(name, si, true, StatusStopped, nil))
+		si, ca := r.metaFor(name, "")
+		out = append(out, buildApp(name, si, ca, r.cfg.RefDomain, true, StatusStopped, nil))
 	}
 
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
@@ -128,9 +133,10 @@ func (r *Registry) managedDirs() []string {
 	return names
 }
 
-// storeInfoFor loads x-casaos for a project, preferring the CasaDash-managed
-// compose file, then the working dir reported by Docker.
-func (r *Registry) storeInfoFor(project, workingDir string) *xcasaos.StoreInfo {
+// metaFor loads an app's metadata (x-casaos and/or x-compose-app) from the same
+// compose file, preferring the CasaDash-managed copy, then the working dir Docker
+// reports. Both may be nil when the file carries neither block.
+func (r *Registry) metaFor(project, workingDir string) (*xcasaos.StoreInfo, *xcomposeapp.App) {
 	candidates := []string{
 		filepath.Join(r.cfg.AppsDir(), project, "docker-compose.yml"),
 	}
@@ -145,11 +151,13 @@ func (r *Registry) storeInfoFor(project, workingDir string) *xcasaos.StoreInfo {
 		if err != nil {
 			continue
 		}
-		if si, err := f.StoreInfo(); err == nil {
-			return si
+		si, _ := f.StoreInfo()
+		ca, _ := f.ComposeApp()
+		if si != nil || ca != nil {
+			return si, ca
 		}
 	}
-	return nil
+	return nil, nil
 }
 
 func statusOf(running, total int) string {
@@ -163,7 +171,7 @@ func statusOf(running, total int) string {
 	}
 }
 
-func buildApp(name string, si *xcasaos.StoreInfo, managed bool, status string, svcPorts map[string][]dockerx.Port) App {
+func buildApp(name string, si *xcasaos.StoreInfo, ca *xcomposeapp.App, domain string, managed bool, status string, svcPorts map[string][]dockerx.Port) App {
 	app := App{ID: name, Name: name, Managed: managed, Status: status}
 	if si != nil {
 		if t := xcasaos.Localized(si.Title); t != "" {
@@ -177,9 +185,28 @@ func buildApp(name string, si *xcasaos.StoreInfo, managed bool, status string, s
 		app.Category = si.Category
 		app.Store = si.StoreAppID
 	}
+	// x-compose-app wins over x-casaos, field by field. Its webui-* fields yield a
+	// fully-resolved click URL, so the frontend opens app.URL directly and skips
+	// the legacy scheme/hostname/port derivation below.
+	if ca != nil {
+		if t := ca.Title.Value(); t != "" {
+			app.Name = t
+		}
+		if ca.Icon != "" {
+			app.Icon = ca.Icon
+		}
+		if ca.Category != "" {
+			app.Category = ca.Category
+		}
+		if ca.ID != "" {
+			app.Store = ca.ID
+		}
+		app.URL = ca.WebURL(domain)
+	}
 	// Prefer the container's ACTUAL published host port so "Open" works without a
-	// gateway. Only when no hostname (gateway route) is configured.
-	if app.Hostname == "" && svcPorts != nil {
+	// gateway. Only when x-compose-app gave no URL and no hostname (gateway route)
+	// is configured.
+	if app.URL == "" && app.Hostname == "" && svcPorts != nil {
 		main := ""
 		if si != nil {
 			main = si.Main

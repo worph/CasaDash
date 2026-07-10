@@ -1,0 +1,47 @@
+# =============================================================================
+# CADDY CONFIGURATION — CasaDash DEV
+# =============================================================================
+# Mirrors the production PCS Caddyfile (template-root/root/Caddyfile). Container
+# routing is done via Docker labels (caddy-docker-proxy); this file only defines
+# global config + reusable snippets + root-domain routing.
+#
+# DEV differences from prod:
+#   - The default (root-domain) service is `casadash`, not `casaos`.
+#   - No Let's Encrypt / sslip.io path: everything is served with the local dev
+#     CA in dev/certs (see gen-certs.sh). Browsers warn unless you trust ca.pem.
+# =============================================================================
+
+{
+	log {
+		output stdout
+		format console
+	}
+
+	# No public ACME in dev — all sites are served from the mounted dev CA cert.
+	# An internal issuer is still declared as a fallback for any label that omits
+	# an explicit tls directive.
+	local_certs
+}
+
+# Gateway/dev TLS: serve the mounted dev-CA leaf cert for every gateway-routed
+# host (auth-<DOMAIN>, casadash-<DOMAIN>, <app>-<DOMAIN>, …). The cert SANs cover
+# *.localhost + localhost, so one cert serves them all. Trust dev/certs/ca.pem in
+# your browser (and in app containers, see README) to silence warnings and let
+# OIDC back-channel TLS validate.
+(gateway_tls) {
+	# Restore original host when a request arrives through a CF-worker-style
+	# proxy (parity with prod; harmless locally).
+	@has_original_host header X-Original-Host *
+	request_header @has_original_host Host {http.request.header.X-Original-Host}
+	tls /certs/cert.pem /certs/key.pem
+}
+
+# =============================================================================
+# ROOT DOMAIN ROUTING — default service (the CasaDash dashboard)
+# Configure via .env.dev: DEFAULT_SERVICE_HOST=casadash DEFAULT_SERVICE_PORT=8080
+# =============================================================================
+
+{$DOMAIN} {
+	import gateway_tls
+	reverse_proxy {$DEFAULT_SERVICE_HOST}:{$DEFAULT_SERVICE_PORT}
+}

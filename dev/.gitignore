@@ -1,0 +1,7 @@
+# Local dev secrets / state — never commit.
+.env.dev
+certs/*.key
+certs/*.pem
+certs/*.srl
+dex/dex.db
+data/
