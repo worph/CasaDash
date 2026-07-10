@@ -1,6 +1,7 @@
 <script lang="ts">
-  import { installAppStream } from '../../stores/store'
-  import { loadApps } from '../../stores/apps'
+  import { installApp } from '../../stores/store'
+  import { apps } from '../../stores/apps'
+  import { sanitizeProject } from '../../project'
   import { t } from '../../i18n'
 
   let {
@@ -9,49 +10,57 @@
     size = 'small',
   }: { id: string; installed?: boolean; size?: 'small' | 'normal' } = $props()
 
-  let installing = $state(false)
-  let pct = $state(0)
+  // Progress is not owned here — it rides the live "apps" channel, the same
+  // source the dashboard tile reads. This button just kicks the install off and
+  // reflects whatever the channel reports, so it stays in sync with the tile
+  // (and keeps advancing even if this store panel is closed and reopened).
+  let starting = $state(false) // optimistic: click → channel confirms
   let error = $state('')
 
-  function install(e: MouseEvent) {
+  const projectId = $derived(sanitizeProject(id))
+  const entry = $derived($apps.find((a) => a.id === projectId))
+  const installing = $derived(starting || entry?.installing === true)
+  const download = $derived(entry?.download ?? 0)
+  const start = $derived(entry?.start ?? 0)
+  const pct = $derived(Math.round(download < 100 ? download : start))
+  const failed = $derived(entry?.install_error ?? '')
+  const isInstalled = $derived(installed || (!!entry && !entry.installing && !entry.install_error))
+
+  // Drop the optimistic flag once the channel confirms the install is tracked.
+  $effect(() => {
+    if (entry?.installing || entry?.install_error) starting = false
+  })
+
+  async function install(e: MouseEvent) {
     e.stopPropagation()
-    if (installed || installing) return
-    installing = true
-    pct = 0
+    if (isInstalled || installing) return
+    starting = true
     error = ''
-    const close = installAppStream(id, (ev) => {
-      if (ev.phase === 'error') {
-        error = ev.message
-        installing = false
-        close()
-        return
-      }
-      pct = Math.max(pct, Math.round(ev.percent))
-      if (ev.phase === 'done') {
-        installed = true
-        installing = false
-        loadApps()
-        close()
-      }
-    })
+    try {
+      await installApp(id)
+    } catch (err) {
+      error = String(err)
+      starting = false
+    }
   }
 </script>
 
 {#if installing}
-  <span class="pill installing" class:normal={size === 'normal'} title="{pct}%">
+  <span class="pill installing" class:normal={size === 'normal'} title="{download < 100 ? $t('downloading') : $t('starting_up')} {pct}%">
     <span class="track"><span class="fill" style:width={`${pct}%`}></span></span>
     <span class="pct">{pct}%</span>
   </span>
 {:else}
   <button
     class="pill"
-    class:done={installed}
+    class:done={isInstalled}
+    class:failed={!!failed || !!error}
     class:normal={size === 'normal'}
-    disabled={installed}
+    disabled={isInstalled}
     onclick={install}
-    title={error}
+    title={failed || error}
   >
-    {installed ? $t('installed') : $t('install')}
+    {isInstalled ? $t('installed') : $t('install')}
   </button>
 {/if}
 
@@ -82,6 +91,10 @@
     background: hsla(118, 70%, 45%, 0.16);
     color: hsl(118, 55%, 32%);
     cursor: default;
+  }
+  .pill.failed {
+    background: hsla(6, 78%, 57%, 0.14);
+    color: hsl(6, 60%, 45%);
   }
   .installing {
     background: hsla(216, 90%, 54%, 0.1);

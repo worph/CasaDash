@@ -11,10 +11,10 @@
 
   let data = $state<StoreData | null>(null)
   let loading = $state(true)
-  let refreshing = $state(false)
   let error = $state('')
   let category = $state('All')
   let developer = $state('All')
+  let store = $state('All')
   let search = $state('')
   let selected = $state<string | null>(null)
 
@@ -27,13 +27,10 @@
       .finally(() => (loading = false))
   }
   async function refresh() {
-    refreshing = true
     try {
       data = await fetchStore()
     } catch (e) {
       error = String(e)
-    } finally {
-      refreshing = false
     }
   }
 
@@ -43,7 +40,24 @@
   const developers = $derived(
     data ? [...new Set(data.apps.map((a) => a.developer).filter(Boolean))].sort() : [],
   )
-  const browsing = $derived(category === 'All' && developer === 'All' && !search.trim())
+  // Distinct store URLs across the merged catalog; the "All" default keeps every
+  // store merged into a single browse.
+  const stores = $derived(
+    data ? [...new Set(data.apps.map((a) => a.store).filter(Boolean))].sort() : [],
+  )
+  // Short "owner/repo" (or host) label for a store URL — mirrors StoreSources.
+  function storeLabel(u: string): string {
+    try {
+      const p = new URL(u)
+      const seg = p.pathname.split('/').filter(Boolean)
+      return seg.length >= 2 ? `${seg[0]}/${seg[1]}` : p.hostname
+    } catch {
+      return u
+    }
+  }
+  const browsing = $derived(
+    category === 'All' && developer === 'All' && store === 'All' && !search.trim(),
+  )
 
   const filtered = $derived.by(() => {
     if (!data) return [] as StoreApp[]
@@ -51,6 +65,7 @@
     return data.apps.filter((a) => {
       if (category !== 'All' && a.category !== category) return false
       if (developer !== 'All' && a.developer !== developer) return false
+      if (store !== 'All' && a.store !== store) return false
       if (q && !`${a.name} ${a.tagline} ${a.category}`.toLowerCase().includes(q)) return false
       return true
     })
@@ -59,7 +74,18 @@
   const featured = $derived.by(() => {
     if (!data) return [] as StoreApp[]
     const byId = new Map(data.apps.map((a) => [a.id.toLowerCase(), a]))
-    return data.recommend.map((id) => byId.get(id.toLowerCase())).filter((a): a is StoreApp => !!a)
+    // Dedupe: a store's recommend-list may repeat an id, which would otherwise
+    // produce duplicate keys in the featured {#each} (Svelte each_key_duplicate).
+    const seen = new Set<string>()
+    const out: StoreApp[] = []
+    for (const id of data.recommend) {
+      const a = byId.get(id.toLowerCase())
+      if (a && !seen.has(a.id)) {
+        seen.add(a.id)
+        out.push(a)
+      }
+    }
+    return out
   })
 </script>
 
@@ -82,6 +108,15 @@
           onback={() => (selected = null)}
         />
       {:else if data}
+        {#if browsing && featured.length}
+          <section>
+            <h4 class="section-title">{$t('featured')}</h4>
+            <div class="featured-row">
+              {#each featured as app (app.id)}{@render hero(app)}{/each}
+            </div>
+          </section>
+        {/if}
+
         <div class="toolbar">
           <select bind:value={category} aria-label={$t('category')}>
             <option value="All">{$t('category')}: {$t('all')}</option>
@@ -91,20 +126,16 @@
             <option value="All">{$t('developer')}: {$t('all')}</option>
             {#each developers as d}<option value={d}>{d}</option>{/each}
           </select>
+          {#if stores.length > 1}
+            <select bind:value={store} aria-label={$t('store')}>
+              <option value="All">{$t('store')}: {$t('all')}</option>
+              {#each stores as s}<option value={s}>{storeLabel(s)}</option>{/each}
+            </select>
+          {/if}
           <input class="search" placeholder={$t('search_apps')} bind:value={search} />
-          <button class="refresh" class:spin={refreshing} title="Refresh" aria-label="Refresh" onclick={refresh}>⟳</button>
           <div class="spacer"></div>
           <StoreSources count={data.apps.length} onchanged={refresh} />
         </div>
-
-        {#if browsing && featured.length}
-          <section>
-            <h4 class="section-title">{$t('featured')}</h4>
-            <div class="featured-row">
-              {#each featured as app (app.id)}{@render hero(app)}{/each}
-            </div>
-          </section>
-        {/if}
 
         <section>
           {#if !browsing}
@@ -144,6 +175,10 @@
     </div>
     <div class="row2">
       <span class="cat">{app.category}</span>
+    </div>
+    <!-- Install pill sits on its own row below the app; while installing it
+         shows a compact progress pill (the two-bar detail lives on the tile). -->
+    <div class="installbar">
       <InstallButton id={app.id} installed={isInstalled(app)} />
     </div>
   </div>
@@ -231,28 +266,6 @@
     width: 12.5rem;
     max-width: 30vw;
   }
-  .refresh {
-    width: 2rem;
-    height: 2rem;
-    border: 1px solid #cfcfcf;
-    border-radius: 6px;
-    background: #fff;
-    font-size: 1.1rem;
-    color: #4a5560;
-    cursor: pointer;
-  }
-  .refresh:hover {
-    background: rgba(0, 0, 0, 0.04);
-  }
-  .refresh.spin {
-    animation: spin 0.8s linear infinite;
-  }
-  @keyframes spin {
-    to {
-      transform: rotate(360deg);
-    }
-  }
-
   .section-title {
     font-size: 1rem;
     font-weight: 400;
@@ -361,7 +374,12 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin: 0.5rem 0 0 calc(64px + 1rem);
+    margin: 0.4rem 0 0 calc(64px + 1rem);
+  }
+  .installbar {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 0.55rem;
   }
   .name {
     font-size: 1rem;

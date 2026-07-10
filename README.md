@@ -56,7 +56,9 @@ volumes:
     target: /DATA
 ```
 
-CasaDash then (a) writes app compose files under `${DATA_ROOT}/AppData/casaos/apps`, (b)
+CasaDash then (a) writes each app's project under `${DATA_ROOT}/AppData/<app>` (flat —
+one folder per app, holding its compose + override + `.env` + data; see
+[`docs/app-model.md`](./docs/app-model.md)), (b)
 rewrites app volume sources (`/DATA/...`, `${DATA_ROOT}`) to the host path, and (c)
 pre-creates each app's bind directories (owned `PUID:PGID`). Use a **host bind**, not a
 named volume — bind mounts can't point inside another container's named volume. See

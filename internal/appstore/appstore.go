@@ -120,6 +120,30 @@ func (m *Manager) Get(id string) (*CatalogApp, []byte, error) {
 	return app, raw, nil
 }
 
+// AppComposeFrom returns the raw docker-compose.yml bytes for app id as it
+// currently stands in store storeURL. It syncs that specific store (using the
+// same cache/ETag path as Refresh) so the update flow can diff the store's live
+// version against what's installed — even if storeURL is no longer in the
+// configured source list. When storeURL is empty it falls back to the merged
+// catalog (Get).
+func (m *Manager) AppComposeFrom(ctx context.Context, storeURL, id string) ([]byte, error) {
+	if strings.TrimSpace(storeURL) == "" {
+		_, raw, err := m.Get(id)
+		return raw, err
+	}
+	root, err := m.syncStore(ctx, storeURL)
+	if err != nil {
+		return nil, err
+	}
+	apps, _, _ := parseStore(root, storeURL)
+	for _, a := range apps {
+		if a.ID == id {
+			return os.ReadFile(a.composePath)
+		}
+	}
+	return nil, fmt.Errorf("app %q not found in store %s", id, storeURL)
+}
+
 // Refresh downloads and reparses every configured store.
 func (m *Manager) Refresh(ctx context.Context) error {
 	catalog := map[string]*CatalogApp{}
@@ -165,6 +189,16 @@ func (m *Manager) Refresh(ctx context.Context) error {
 	return nil
 }
 
+// RefreshStore forces a re-download of a single store — clearing its cached
+// ETag so syncStore refetches it — then rebuilds the merged catalog. Other
+// stores are re-synced too but skip their download when their ETag is unchanged.
+func (m *Manager) RefreshStore(ctx context.Context, storeURL string) error {
+	m.mu.Lock()
+	delete(m.lastETag, storeURL)
+	m.mu.Unlock()
+	return m.Refresh(ctx)
+}
+
 // StartAutoRefresh refreshes now and then every interval until ctx is done.
 func (m *Manager) StartAutoRefresh(ctx context.Context, interval time.Duration) {
 	go func() {
@@ -186,8 +220,10 @@ func (m *Manager) StartAutoRefresh(ctx context.Context, interval time.Duration) 
 // and returns the store root directory (the parent of the Apps/ folder).
 func (m *Manager) syncStore(ctx context.Context, storeURL string) (string, error) {
 	workdir := m.workdir(storeURL)
+	candidates := storeZipCandidates(storeURL)
+	primary := candidates[0]
 
-	if etag, err := headETag(ctx, storeURL); err == nil && etag != "" {
+	if etag, err := headETag(ctx, primary); err == nil && etag != "" {
 		m.mu.RLock()
 		prev := m.lastETag[storeURL]
 		m.mu.RUnlock()
@@ -203,14 +239,70 @@ func (m *Manager) syncStore(ctx context.Context, storeURL string) (string, error
 		}()
 	}
 
-	if err := download(ctx, storeURL, workdir); err != nil {
-		// Fall back to any previously extracted copy.
-		if root, ferr := findAppsRoot(workdir); ferr == nil {
-			return root, nil
+	var lastErr error
+	for _, dl := range candidates {
+		if err := download(ctx, dl, workdir); err != nil {
+			lastErr = err
+			continue
 		}
-		return "", err
+		return findAppsRoot(workdir)
 	}
-	return findAppsRoot(workdir)
+	// Every candidate failed: fall back to any previously extracted copy.
+	if root, ferr := findAppsRoot(workdir); ferr == nil {
+		return root, nil
+	}
+	return "", lastErr
+}
+
+// storeZipCandidates maps the various GitHub URL forms a user might paste into
+// the codeload archive URL(s) to actually fetch. Supported inputs:
+//
+//	https://github.com/owner/repo                       -> archive main (then master)
+//	https://github.com/owner/repo.git                   -> archive main (then master)
+//	https://github.com/owner/repo/tree/<branch>         -> archive <branch>
+//	https://github.com/owner/repo/archive/....zip       -> unchanged
+//
+// Non-GitHub hosts and URLs already ending in .zip are passed through untouched.
+// When the branch is implicit both "main" and "master" archives are returned so
+// the repository's default branch is auto-detected at download time.
+func storeZipCandidates(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	u, err := url.Parse(raw)
+	if err != nil {
+		return []string{raw}
+	}
+	host := strings.ToLower(u.Host)
+	if host != "github.com" && host != "www.github.com" {
+		return []string{raw} // direct zip or some other host: leave as-is
+	}
+	if strings.HasSuffix(strings.ToLower(u.Path), ".zip") {
+		return []string{raw} // already an archive URL
+	}
+
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	if len(parts) < 2 {
+		return []string{raw}
+	}
+	owner := parts[0]
+	repo := strings.TrimSuffix(parts[1], ".git")
+	if owner == "" || repo == "" {
+		return []string{raw}
+	}
+
+	scheme := u.Scheme
+	if scheme == "" {
+		scheme = "https"
+	}
+	archive := func(branch string) string {
+		return fmt.Sprintf("%s://github.com/%s/%s/archive/refs/heads/%s.zip", scheme, owner, repo, branch)
+	}
+
+	// .../tree/<branch>[/<subpath>...] — explicit branch (may contain slashes).
+	if len(parts) >= 4 && parts[2] == "tree" {
+		return []string{archive(strings.Join(parts[3:], "/"))}
+	}
+	// Repo root / clone URL: default branch unknown, try main then master.
+	return []string{archive("main"), archive("master")}
 }
 
 func (m *Manager) workdir(storeURL string) string {

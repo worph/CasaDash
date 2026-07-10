@@ -6,6 +6,7 @@
   import { apps, loadApps, subscribeApps, type App } from '../stores/apps'
   import { links, type Link } from '../stores/links'
   import { clickOutside } from '../actions'
+  import { tileDragging } from '../stores/ui'
   import { t } from '../i18n'
 
   let items = $state<TileData[]>([])
@@ -57,6 +58,7 @@
 
   function onConsider(e: CustomEvent<{ items: TileData[] }>) {
     dragging = true
+    tileDragging.set(true)
     items = e.detail.items
   }
   function onFinalize(e: CustomEvent<{ items: TileData[] }>) {
@@ -65,6 +67,10 @@
     items = [STORE_TILE, ...rest]
     dragging = false
     saveOrder(rest.map((t) => t.id))
+    // A mouse drop fires a trailing `click` on the tile right after this handler.
+    // Clear on the next tick so that click is swallowed (see tileDragging) while
+    // genuine clicks — which never trigger a drag — still open the app.
+    setTimeout(() => tileDragging.set(false), 0)
   }
 </script>
 
@@ -93,7 +99,7 @@
     onfinalize={onFinalize}
   >
     {#each items as tile (tile.id)}
-      <div class="cell"><Tile {tile} /></div>
+      <div class="cell" class:grabbing={dragging}><Tile {tile} /></div>
     {/each}
   </div>
 </section>
@@ -167,6 +173,13 @@
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: var(--grid-gap);
+  }
+  /* Tiles are draggable to reorder; a plain click still opens the app. */
+  .cell {
+    cursor: grab;
+  }
+  .cell.grabbing {
+    cursor: grabbing;
   }
   @media (min-width: 1024px) {
     .app-list {

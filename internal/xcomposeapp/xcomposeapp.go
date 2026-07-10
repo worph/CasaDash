@@ -50,6 +50,13 @@ type App struct {
 	WebUIScheme string `yaml:"webui-scheme,omitempty"`
 	WebUIPath   string `yaml:"webui-path,omitempty"`
 
+	// Update reference: where this app was installed from, so CasaDash can pull a
+	// fresher docker-compose.yml from the same store and re-apply it. Written into
+	// the override's x-compose-app block at install time (see installer). Store is
+	// the reference store URL; StoreAppID is the catalog id within that store.
+	Store      string `yaml:"store,omitempty"`
+	StoreAppID string `yaml:"store-app-id,omitempty"`
+
 	Links []Link `yaml:"links,omitempty"`
 }
 

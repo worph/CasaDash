@@ -58,14 +58,19 @@ func FromEnv() Config {
 	return c
 }
 
-// AppsDir is where per-app compose projects are written (CasaOS-compatible).
+// AppsDir is the flat root that holds one directory per app
+// (${DATA_ROOT}/AppData/<app>). Each app directory carries its own
+// docker-compose.yml, docker-compose.override.yml, .env, and data — the folder's
+// presence is what makes an app appear on the dashboard. See docs/app-model.md.
 func (c Config) AppsDir() string {
-	return filepath.Join(c.DataRoot, "AppData", "casaos", "apps")
+	return filepath.Join(c.DataRoot, "AppData")
 }
 
-// StateDir is where CasaDash's own state (settings, store cache) lives.
+// StateDir is where CasaDash's own state (settings, store cache) lives. It sits
+// under AppData with a dot-prefixed name so the app model's "a dot in the name
+// hides it" rule keeps it off the dashboard.
 func (c Config) StateDir() string {
-	return filepath.Join(c.DataRoot, "AppData", "casadash")
+	return filepath.Join(c.DataRoot, "AppData", ".casadash")
 }
 
 func envOr(key, def string) string {

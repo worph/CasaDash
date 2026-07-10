@@ -7,15 +7,21 @@ package apps
 import (
 	"context"
 	"fmt"
+	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 
+	"github.com/yundera/casadash/internal/composecmd"
 	"github.com/yundera/casadash/internal/composefile"
 	"github.com/yundera/casadash/internal/config"
 	"github.com/yundera/casadash/internal/dockerx"
+	"github.com/yundera/casadash/internal/envinject"
 	"github.com/yundera/casadash/internal/xcasaos"
 	"github.com/yundera/casadash/internal/xcomposeapp"
 )
@@ -44,35 +50,143 @@ type App struct {
 	// (webui-*). When empty, the frontend derives the URL from the legacy
 	// scheme/hostname/port/index fields.
 	URL string `json:"url,omitempty"`
+	// Health is the aggregated Docker health-check verdict: "healthy",
+	// "unhealthy", "starting", or "" when no container declares a health check.
+	// Drives the tile's top-left status dot (green/orange).
+	Health string `json:"health,omitempty"`
+	// Busy is set while a lifecycle operation (start/stop/restart/uninstall) is
+	// in flight for this app. The tile then shows a "…" overlay and hides its
+	// burger menu until the operation settles.
+	Busy bool `json:"busy,omitempty"`
+	// Install progress, overlaid by the server from the installer's tracker while
+	// a store install is in flight (see installer.InstallState). The tile renders
+	// two bars — Download (image pull) and Start (Docker bring-up) — while
+	// Installing is true. These are never set by List() itself.
+	Installing   bool    `json:"installing,omitempty"`
+	Download     float64 `json:"download,omitempty"`
+	Start        float64 `json:"start,omitempty"`
+	Phase        string  `json:"phase,omitempty"`
+	InstallError string  `json:"install_error,omitempty"`
 }
+
+// Health verdicts, aggregated across a project's containers.
+const (
+	HealthHealthy   = "healthy"
+	HealthUnhealthy = "unhealthy"
+	HealthStarting  = "starting"
+)
 
 // Registry reconciles on-disk projects with Docker state.
 type Registry struct {
 	cfg config.Config
 	dx  *dockerx.Client
+
+	// OnChange, if set, is invoked whenever the busy set changes so the server
+	// can rebroadcast the app list (making the "…" overlay appear/disappear
+	// live). Optional.
+	OnChange func()
+
+	mu   sync.Mutex
+	busy map[string]int // app id -> in-flight operation count
 }
 
 // New creates a Registry.
 func New(cfg config.Config, dx *dockerx.Client) *Registry {
-	return &Registry{cfg: cfg, dx: dx}
+	return &Registry{cfg: cfg, dx: dx, busy: map[string]int{}}
+}
+
+// enter/leave bracket an in-flight lifecycle operation on id. A counter (not a
+// bool) tolerates nesting — e.g. Start delegating to EnsureStarted. OnChange
+// fires on both edges so the tile's busy overlay tracks the operation live.
+func (r *Registry) enter(id string) {
+	r.mu.Lock()
+	r.busy[id]++
+	r.mu.Unlock()
+	r.changed()
+}
+
+func (r *Registry) leave(id string) {
+	r.mu.Lock()
+	if r.busy[id] > 0 {
+		r.busy[id]--
+		if r.busy[id] == 0 {
+			delete(r.busy, id)
+		}
+	}
+	r.mu.Unlock()
+	r.changed()
+}
+
+// WithBusy runs fn while marking id busy, so the tile shows its "…" overlay and
+// hides the burger menu for the duration (e.g. while a store update is applied
+// out-of-band by the installer). See docs/app-model.md.
+func (r *Registry) WithBusy(id string, fn func() error) error {
+	r.enter(id)
+	defer r.leave(id)
+	return fn()
+}
+
+func (r *Registry) isBusy(id string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.busy[id] > 0
+}
+
+func (r *Registry) changed() {
+	if r.OnChange != nil {
+		r.OnChange()
+	}
 }
 
 type projectState struct {
 	workingDir string
 	running    int
 	total      int
+	healthy    int
+	unhealthy  int
+	starting   int
 	svcPorts   map[string][]dockerx.Port // service name -> published ports
 }
 
+// health aggregates the project's per-container verdicts into one dot state:
+// any unhealthy container wins, then any still-starting, then healthy; "" when
+// no container declares a health check.
+func (ps *projectState) health() string {
+	switch {
+	case ps.unhealthy > 0:
+		return HealthUnhealthy
+	case ps.starting > 0:
+		return HealthStarting
+	case ps.healthy > 0:
+		return HealthHealthy
+	default:
+		return ""
+	}
+}
+
 // List returns all app tiles, sorted by display name.
+//
+// Existence is driven by the filesystem, appearance by Docker (docs/app-model.md):
+// managed apps come from the on-disk `AppData/<app>/` folders — a cheap, always-
+// available local read — and Docker state is layered on top as best-effort. A
+// failed or slow Docker query therefore yields greyed (stopped) tiles rather than
+// an empty grid, and never returns an error to the caller. Externally-created
+// x-casaos stacks are only surfaced when Docker actually answers.
 func (r *Registry) List(ctx context.Context) ([]App, error) {
 	conts, err := r.dx.ListProjectContainers(ctx)
 	if err != nil {
-		return nil, err
+		// Best-effort: fall through with no container state so installed apps still
+		// render (greyed) instead of the grid blanking on a Docker hiccup.
+		log.Printf("apps: docker list failed, showing installed apps as stopped: %v", err)
 	}
 
 	projects := map[string]*projectState{}
 	for _, c := range conts {
+		// A dot in the project name is reserved (archives, internal dirs) and never
+		// surfaces as a tile — see docs/app-model.md.
+		if strings.Contains(c.Project, ".") {
+			continue
+		}
 		ps := projects[c.Project]
 		if ps == nil {
 			ps = &projectState{workingDir: c.WorkingDir, svcPorts: map[string][]dockerx.Port{}}
@@ -82,6 +196,14 @@ func (r *Registry) List(ctx context.Context) ([]App, error) {
 		if c.State == "running" {
 			ps.running++
 		}
+		switch c.Health {
+		case HealthHealthy:
+			ps.healthy++
+		case HealthUnhealthy:
+			ps.unhealthy++
+		case HealthStarting:
+			ps.starting++
+		}
 		if len(c.Ports) > 0 {
 			ps.svcPorts[c.Service] = c.Ports
 		}
@@ -90,24 +212,40 @@ func (r *Registry) List(ctx context.Context) ([]App, error) {
 	seen := map[string]bool{}
 	var out []App
 
-	for name, ps := range projects {
-		managed := r.isManaged(name)
-		si, ca := r.metaFor(name, ps.workingDir)
-		if si == nil && ca == nil && !managed {
-			// A non-CasaDash stack without any recognised metadata: not our concern.
-			continue
+	// Managed apps first — existence comes from the folder, so these always produce
+	// a tile even when Docker is unreachable. Docker state decorates them when known.
+	for _, name := range r.managedDirs() {
+		ps := projects[name]
+		var app App
+		if ps != nil {
+			si, ca := r.metaFor(name, ps.workingDir)
+			app = buildApp(name, si, ca, r.cfg.RefDomain, true, statusOf(ps.running, ps.total), ps.svcPorts)
+			app.Health = ps.health()
+		} else {
+			// Installed but down (or Docker didn't answer): greyed, stopped tile.
+			si, ca := r.metaFor(name, "")
+			app = buildApp(name, si, ca, r.cfg.RefDomain, true, StatusStopped, nil)
 		}
-		out = append(out, buildApp(name, si, ca, r.cfg.RefDomain, managed, statusOf(ps.running, ps.total), ps.svcPorts))
+		app.Busy = r.isBusy(name)
+		out = append(out, app)
 		seen[name] = true
 	}
 
-	// Managed projects that exist on disk but have no containers (installed but down).
-	for _, name := range r.managedDirs() {
+	// Unmanaged stacks discovered via Docker (externally-created x-casaos apps):
+	// only knowable when Docker answered, and only if they carry recognised metadata.
+	for name, ps := range projects {
 		if seen[name] {
 			continue
 		}
-		si, ca := r.metaFor(name, "")
-		out = append(out, buildApp(name, si, ca, r.cfg.RefDomain, true, StatusStopped, nil))
+		si, ca := r.metaFor(name, ps.workingDir)
+		if si == nil && ca == nil {
+			continue // a non-CasaDash stack without any recognised metadata: not ours.
+		}
+		app := buildApp(name, si, ca, r.cfg.RefDomain, false, statusOf(ps.running, ps.total), ps.svcPorts)
+		app.Health = ps.health()
+		app.Busy = r.isBusy(name)
+		out = append(out, app)
+		seen[name] = true
 	}
 
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
@@ -126,38 +264,87 @@ func (r *Registry) managedDirs() []string {
 	}
 	var names []string
 	for _, e := range entries {
-		if e.IsDir() && r.isManaged(e.Name()) {
+		// A dot in the directory name hides it from the dashboard: this covers
+		// uninstall archives (<app>.<date>.archive) and CasaDash's own
+		// dot-prefixed state dir. See docs/app-model.md.
+		if e.IsDir() && !strings.Contains(e.Name(), ".") && r.isManaged(e.Name()) {
 			names = append(names, e.Name())
 		}
 	}
 	return names
 }
 
-// metaFor loads an app's metadata (x-casaos and/or x-compose-app) from the same
-// compose file, preferring the CasaDash-managed copy, then the working dir Docker
-// reports. Both may be nil when the file carries neither block.
+// metaFor loads an app's metadata (x-casaos and/or x-compose-app), preferring the
+// CasaDash-managed copy, then the working dir Docker reports. For a managed app the
+// user override is merged on top of the strict base, so override-only metadata (a
+// webui-host pinned via the Web UI editor, say) wins. Both may be nil when neither
+// file carries a recognised block.
 func (r *Registry) metaFor(project, workingDir string) (*xcasaos.StoreInfo, *xcomposeapp.App) {
-	candidates := []string{
-		filepath.Join(r.cfg.AppsDir(), project, "docker-compose.yml"),
-	}
-	if workingDir != "" {
-		candidates = append(candidates,
-			filepath.Join(workingDir, "docker-compose.yml"),
-			filepath.Join(workingDir, "docker-compose.yaml"),
-		)
-	}
-	for _, path := range candidates {
-		f, err := composefile.Load(path)
-		if err != nil {
-			continue
-		}
-		si, _ := f.StoreInfo()
-		ca, _ := f.ComposeApp()
+	dir := filepath.Join(r.cfg.AppsDir(), project)
+	if base, err := composefile.Load(filepath.Join(dir, "docker-compose.yml")); err == nil {
+		si, ca := mergedMeta(base, loadOptional(filepath.Join(dir, "docker-compose.override.yml")))
 		if si != nil || ca != nil {
 			return si, ca
 		}
 	}
+	if workingDir != "" {
+		for _, path := range []string{
+			filepath.Join(workingDir, "docker-compose.yml"),
+			filepath.Join(workingDir, "docker-compose.yaml"),
+		} {
+			f, err := composefile.Load(path)
+			if err != nil {
+				continue
+			}
+			si, _ := f.StoreInfo()
+			ca, _ := f.ComposeApp()
+			if si != nil || ca != nil {
+				return si, ca
+			}
+		}
+	}
 	return nil, nil
+}
+
+// loadOptional loads a compose file, returning nil if it is absent/unreadable.
+func loadOptional(path string) *composefile.File {
+	f, err := composefile.Load(path)
+	if err != nil {
+		return nil
+	}
+	return f
+}
+
+// mergedMeta parses x-casaos / x-compose-app from base with over's blocks
+// shallow-merged on top (override keys win). over may be nil.
+func mergedMeta(base, over *composefile.File) (*xcasaos.StoreInfo, *xcomposeapp.App) {
+	xc, xa := base.XCasaOS, base.XComposeApp
+	if over != nil {
+		xc = shallowMerge(xc, over.XCasaOS)
+		xa = shallowMerge(xa, over.XComposeApp)
+	}
+	si, _ := xcasaos.Parse(xc)
+	ca, _ := xcomposeapp.Parse(xa)
+	return si, ca
+}
+
+// shallowMerge returns base with over's keys layered on top (over wins). Either
+// map may be nil.
+func shallowMerge(base, over map[string]any) map[string]any {
+	if over == nil {
+		return base
+	}
+	if base == nil {
+		return over
+	}
+	out := make(map[string]any, len(base)+len(over))
+	for k, v := range base {
+		out[k] = v
+	}
+	for k, v := range over {
+		out[k] = v
+	}
+	return out
 }
 
 func statusOf(running, total int) string {
@@ -253,46 +440,137 @@ func reachableHostPort(svcPorts map[string][]dockerx.Port, main string, webui in
 	return 0
 }
 
-// Start/Stop/Restart/Uninstall proxy to Docker and (for uninstall) remove the
-// on-disk project.
-func (r *Registry) Start(ctx context.Context, id string) error {
+// FindByHost resolves the app whose click URL is served at host (an app gateway
+// host such as `<app>-<domain>`), so the launch gate can identify which app it is
+// standing in for. It matches the app's resolved web URL host, its x-casaos
+// hostname, or the `<id>-<refDomain>` convention. Returns false when no app maps
+// to host.
+func (r *Registry) FindByHost(ctx context.Context, host, refDomain string) (App, bool) {
+	host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+	if host == "" {
+		return App{}, false
+	}
+	list, err := r.List(ctx)
+	if err != nil {
+		return App{}, false
+	}
+	for _, a := range list {
+		if h := urlHost(a.URL); h != "" && strings.EqualFold(h, host) {
+			return a, true
+		}
+		if a.Hostname != "" && strings.EqualFold(a.Hostname, host) {
+			return a, true
+		}
+		if refDomain != "" && strings.EqualFold(a.ID+"-"+refDomain, host) {
+			return a, true
+		}
+	}
+	return App{}, false
+}
+
+// urlHost extracts the host (no port) from a full URL, or "" if it cannot parse.
+func urlHost(u string) string {
+	if u == "" {
+		return ""
+	}
+	p, err := url.Parse(u)
+	if err != nil {
+		return ""
+	}
+	return p.Hostname()
+}
+
+// composeFiles returns the compose file list for a managed app: the strict base
+// plus its user override when present (Compose override semantics — the running
+// stack is base + override). Because we pass explicit -f flags, the override is
+// not auto-discovered by `docker compose`; we add it here.
+func (r *Registry) composeFiles(dir string) []string {
+	files := []string{filepath.Join(dir, "docker-compose.yml")}
+	override := filepath.Join(dir, "docker-compose.override.yml")
+	if _, err := os.Stat(override); err == nil {
+		files = append(files, override)
+	}
+	return files
+}
+
+// EnsureStarted brings an app up. For a CasaDash-managed project it runs
+// `docker compose up -d` (idempotent — starts a stopped stack or recreates a
+// removed one) from base + override; for a discovered/unmanaged stack it starts
+// its existing containers. The tile shows a "…" busy overlay while it runs.
+func (r *Registry) EnsureStarted(ctx context.Context, id string) error {
+	r.enter(id)
+	defer r.leave(id)
+	if r.isManaged(id) {
+		dir := filepath.Join(r.cfg.AppsDir(), id)
+		return composecmd.Up(ctx, dir, id, r.composeFiles(dir), envinject.Env(r.cfg, id))
+	}
 	return r.dx.StartProject(ctx, id)
 }
 
+// Start brings an app up. For a managed app this is `compose up -d` (so a fully
+// down stack whose containers were removed is recreated); for an unmanaged stack
+// it starts the existing containers.
+func (r *Registry) Start(ctx context.Context, id string) error {
+	return r.EnsureStarted(ctx, id)
+}
+
 func (r *Registry) Stop(ctx context.Context, id string) error {
+	r.enter(id)
+	defer r.leave(id)
 	return r.dx.StopProject(ctx, id)
 }
 
 func (r *Registry) Restart(ctx context.Context, id string) error {
+	r.enter(id)
+	defer r.leave(id)
 	return r.dx.RestartProject(ctx, id)
 }
 
-// Uninstall stops+removes the project's containers and deletes the managed
-// compose project directory. App data under ${DATA_ROOT}/AppData/<id> is
-// preserved unless archiveData is set, in which case it is first zipped to a
-// timestamped archive alongside it and then removed (matching CasaOS).
-func (r *Registry) Uninstall(ctx context.Context, id string, archiveData bool) (string, error) {
+// Uninstall stops+removes the project's containers and archives its app
+// directory. CasaDash never deletes user data: the whole ${DATA_ROOT}/AppData/<id>
+// folder (compose + override + .env + data) is renamed to
+// <id>.<date>.archive, or, when zip is set, compressed to
+// <id>.<date>.archive.zip and the folder removed. Either way the dotted name
+// hides it from the dashboard. Returns the archive's base name (empty when there
+// was nothing on disk to archive, e.g. an unmanaged stack).
+func (r *Registry) Uninstall(ctx context.Context, id string, zip bool) (string, error) {
+	r.enter(id)
+	defer r.leave(id)
+
 	_ = r.dx.RemoveProject(ctx, id)
-	if r.isManaged(id) {
-		_ = os.RemoveAll(filepath.Join(r.cfg.AppsDir(), id))
+
+	appDir := filepath.Join(r.cfg.AppsDir(), id)
+	if _, err := os.Stat(appDir); err != nil {
+		return "", nil // nothing on disk (unmanaged) — containers already removed
 	}
 
-	dataDir := filepath.Join(r.cfg.DataRoot, "AppData", id)
-	if _, err := os.Stat(dataDir); err != nil {
-		return "", nil // no app data
-	}
-	if !archiveData {
-		return "", nil // keep app data untouched
+	stamp := time.Now().Format("2006-01-02")
+	base := uniqueName(r.cfg.AppsDir(), id+"."+stamp+".archive")
+
+	if zip {
+		zipName := base + ".zip"
+		zipPath := filepath.Join(r.cfg.AppsDir(), zipName)
+		if err := archiveDir(appDir, zipPath); err != nil {
+			return "", fmt.Errorf("archive app: %w", err)
+		}
+		if err := os.RemoveAll(appDir); err != nil {
+			return zipName, fmt.Errorf("remove app dir: %w", err)
+		}
+		return zipName, nil
 	}
 
-	stamp := time.Now().Format("20060102-150405")
-	zipName := id + "_" + stamp + ".zip"
-	zipPath := filepath.Join(r.cfg.DataRoot, "AppData", zipName)
-	if err := archiveDir(dataDir, zipPath); err != nil {
-		return "", fmt.Errorf("archive app data: %w", err)
+	if err := os.Rename(appDir, filepath.Join(r.cfg.AppsDir(), base)); err != nil {
+		return "", fmt.Errorf("archive app: %w", err)
 	}
-	if err := os.RemoveAll(dataDir); err != nil {
-		return zipName, fmt.Errorf("remove app data: %w", err)
+	return base, nil
+}
+
+// uniqueName returns name, or name with a "-HHMMSS" suffix inserted before any
+// extension, if a same-day archive already exists in dir — so uninstalling the
+// same app twice in one day never clobbers the earlier archive.
+func uniqueName(dir, name string) string {
+	if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+		return name
 	}
-	return zipName, nil
+	return name + "-" + time.Now().Format("150405")
 }

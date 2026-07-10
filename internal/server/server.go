@@ -8,6 +8,8 @@ import (
 	"log"
 	"net/http"
 	"path/filepath"
+	"sort"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -56,6 +58,9 @@ func New(cfg config.Config, uiFS fs.FS) http.Handler {
 		}
 		s.dx = dx
 		s.apps = apps.New(cfg, dx)
+		// Rebroadcast the app list whenever a lifecycle op enters/leaves its busy
+		// state, so tiles show/hide the "…" overlay live (docs/app-model.md).
+		s.apps.OnChange = s.broadcastApps
 		s.hub.AppsSnapshot = s.appsSnapshot
 		s.watchDocker()
 	}
@@ -69,6 +74,9 @@ func New(cfg config.Config, uiFS fs.FS) http.Handler {
 	s.store = appstore.New(initialURLs, filepath.Join(cfg.StateDir(), "appstore"))
 	s.store.StartAutoRefresh(context.Background(), time.Hour)
 	s.installer = installer.New(cfg, s.store, s.dx)
+	// Rebroadcast the app list as install progress advances so the tile's
+	// Download/Start bars move live. Pull events are frequent, so throttle.
+	s.installer.OnUpdate = throttle(300*time.Millisecond, s.broadcastApps)
 
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
@@ -81,6 +89,11 @@ func New(cfg config.Config, uiFS fs.FS) http.Handler {
 		r.Get("/apps", s.handleListApps)
 		r.Get("/apps/{id}/config", s.handleGetConfig)
 		r.Put("/apps/{id}/config", s.handlePutConfig)
+		r.Put("/apps/{id}/webui", s.handlePutWebUI)
+		r.Put("/apps/{id}/note", s.handlePutNote)
+		r.Get("/apps/{id}/update", s.handleCheckUpdate)
+		r.Post("/apps/{id}/update", s.handleApplyUpdate)
+		r.Get("/apps/{id}/services", s.handleAppServices)
 		r.Get("/apps/{id}/logs", s.handleAppLogs)
 		r.Get("/apps/{id}/stats", s.handleAppStats)
 		r.Post("/apps/{id}/{action}", s.handleAppAction)
@@ -90,16 +103,35 @@ func New(cfg config.Config, uiFS fs.FS) http.Handler {
 		r.Get("/store/sources", s.handleStoreSources)
 		r.Post("/store/sources", s.handleAddStoreSource)
 		r.Delete("/store/sources", s.handleRemoveStoreSource)
+		r.Post("/store/sources/refresh", s.handleRefreshStoreSource)
 		r.Get("/store/app/{id}", s.handleStoreApp)
 		r.Post("/store/{id}/install", s.handleInstall)
-		r.Get("/store/{id}/install/ws", s.handleInstallWS)
 
 		r.Get("/settings", s.handleGetSettings)
 		r.Put("/settings", s.handlePutSettings)
 	})
 
 	r.Handle("/*", spaHandler(uiFS))
-	return r
+
+	return s.rootHandler(r)
+}
+
+// rootHandler marks every response with the X-Casadash header (so the launch
+// gate can tell CasaDash's catch-all apart from a real app, same-origin) and
+// dispatches by Host: our own dashboard hosts get the dashboard router; any
+// other host is an app gateway host we are catching for while the app is down,
+// so it gets the launch gate. With Docker unavailable there is no app registry,
+// so everything falls back to the dashboard.
+func (s *Server) rootHandler(dashboard http.Handler) http.Handler {
+	gate := s.gateRouter()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Casadash", "1")
+		if s.apps == nil || s.isDashboardHost(r.Host) {
+			dashboard.ServeHTTP(w, r)
+			return
+		}
+		gate.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) handlePing(w http.ResponseWriter, _ *http.Request) {
@@ -110,6 +142,18 @@ func (s *Server) handleSystemStats(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, s.collector.Sample())
 }
 
+// listApps returns the reconciled app list with any in-flight installs overlaid
+// so their tiles carry live progress. Shared by the REST endpoint and the live
+// "apps" channel so both reflect installs identically (a page reload mid-install
+// shows progress without waiting for the next broadcast).
+func (s *Server) listApps(ctx context.Context) []apps.App {
+	list, _ := s.apps.List(ctx)
+	if s.installer != nil {
+		list = overlayInstalls(list, s.installer.Installs())
+	}
+	return list
+}
+
 // appsSnapshot returns the current app list for the live "apps" channel.
 func (s *Server) appsSnapshot() any {
 	if s.apps == nil {
@@ -117,11 +161,75 @@ func (s *Server) appsSnapshot() any {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	list, err := s.apps.List(ctx)
-	if err != nil {
-		return []any{}
+	if list := s.listApps(ctx); list != nil {
+		return list
 	}
+	return []any{}
+}
+
+// overlayInstalls stamps install progress onto matching app tiles, and appends a
+// placeholder tile for any install whose on-disk/Docker footprint doesn't exist
+// yet (the brief window before the compose dir is written). Returns the list
+// re-sorted by display name.
+func overlayInstalls(list []apps.App, installs []installer.InstallState) []apps.App {
+	if len(installs) == 0 {
+		return list
+	}
+	byID := make(map[string]int, len(list))
+	for i, a := range list {
+		byID[a.ID] = i
+	}
+	for _, st := range installs {
+		if i, ok := byID[st.ID]; ok {
+			list[i].Installing = st.Phase != "error"
+			list[i].Download = st.Download
+			list[i].Start = st.Start
+			list[i].Phase = st.Phase
+			list[i].InstallError = st.Error
+			continue
+		}
+		list = append(list, apps.App{
+			ID:           st.ID,
+			Name:         st.Name,
+			Icon:         st.Icon,
+			Status:       apps.StatusStopped,
+			Managed:      true,
+			Installing:   st.Phase != "error",
+			Download:     st.Download,
+			Start:        st.Start,
+			Phase:        st.Phase,
+			InstallError: st.Error,
+		})
+	}
+	sort.Slice(list, func(i, j int) bool { return list[i].Name < list[j].Name })
 	return list
+}
+
+// throttle returns a function that runs fn at most once per d, always running a
+// trailing call so the final state is not dropped.
+func throttle(d time.Duration, fn func()) func() {
+	var mu sync.Mutex
+	var timer *time.Timer
+	var last time.Time
+	return func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if timer != nil {
+			return // a trailing call is already scheduled
+		}
+		if wait := d - time.Since(last); wait > 0 {
+			timer = time.AfterFunc(wait, func() {
+				mu.Lock()
+				timer = nil
+				last = time.Now()
+				mu.Unlock()
+				fn()
+			})
+			return
+		}
+		last = time.Now()
+		fn()
+	}
 }
 
 // broadcastApps pushes the current app list to "apps" channel subscribers.

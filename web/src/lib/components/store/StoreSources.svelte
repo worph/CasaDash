@@ -1,5 +1,10 @@
 <script lang="ts">
-  import { fetchStoreSources, addStoreSource, removeStoreSource } from '../../stores/store'
+  import {
+    fetchStoreSources,
+    addStoreSource,
+    removeStoreSource,
+    refreshStoreSource,
+  } from '../../stores/store'
   import { clickOutside } from '../../actions'
 
   let { count, onchanged }: { count: number; onchanged: () => void } = $props()
@@ -9,6 +14,7 @@
   let adding = $state(false)
   let url = $state('')
   let busy = $state(false)
+  let reloading = $state('')
   let error = $state('')
 
   async function load() {
@@ -59,6 +65,16 @@
       busy = false
     }
   }
+
+  async function reload(u: string) {
+    reloading = u
+    try {
+      await refreshStoreSource(u)
+      onchanged()
+    } finally {
+      reloading = ''
+    }
+  }
 </script>
 
 <div class="wrap">
@@ -72,6 +88,14 @@
       {#each sources as u (u)}
         <div class="row">
           <span class="name" title={u}>{shortName(u)}</span>
+          <button
+            class="reload"
+            class:spin={reloading === u}
+            aria-label="Reload"
+            title="Reload store"
+            disabled={busy || reloading !== ''}
+            onclick={() => reload(u)}>⟳</button
+          >
           <button
             class="trash"
             aria-label="Remove"
@@ -151,6 +175,26 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .reload {
+    border: none;
+    background: none;
+    color: var(--grey-600);
+    font-size: 0.95rem;
+    line-height: 1;
+    cursor: pointer;
+  }
+  .reload:disabled {
+    cursor: default;
+    opacity: 0.4;
+  }
+  .reload.spin {
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
   }
   .trash {
     border: none;

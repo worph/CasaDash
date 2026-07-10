@@ -1,5 +1,4 @@
 import { api } from '../api/client'
-import { openStream } from '../live/stream'
 
 export interface StoreApp {
   id: string
@@ -30,8 +29,11 @@ export function fetchStoreApp(id: string): Promise<StoreApp> {
   return api.get<StoreApp>(`/api/store/app/${encodeURIComponent(id)}`)
 }
 
-export function installApp(id: string): Promise<void> {
-  return api.post(`/api/store/${encodeURIComponent(id)}/install`)
+/** Kick off a detached install. Resolves once the server has *started* it (not
+ *  when it finishes) with the app's compose project id; progress then arrives on
+ *  the live "apps" channel as the tile's download/start bars. */
+export function installApp(id: string): Promise<{ status: string; id: string }> {
+  return api.post<{ status: string; id: string }>(`/api/store/${encodeURIComponent(id)}/install`)
 }
 
 export function fetchStoreSources(): Promise<{ sources: string[] }> {
@@ -43,29 +45,7 @@ export function addStoreSource(url: string): Promise<{ sources: string[] }> {
 export function removeStoreSource(url: string): Promise<{ sources: string[] }> {
   return api.del<{ sources: string[] }>('/api/store/sources', { url })
 }
-
-export interface InstallEvent {
-  phase: 'pull' | 'prepare' | 'start' | 'done' | 'error'
-  message: string
-  percent: number
+export function refreshStoreSource(url: string): Promise<{ sources: string[] }> {
+  return api.post<{ sources: string[] }>('/api/store/sources/refresh', { url })
 }
 
-/** Install `id` while streaming progress events over a WebSocket. Returns a
- *  function that closes the stream. */
-export function installAppStream(
-  id: string,
-  onEvent: (e: InstallEvent) => void,
-  onClose?: () => void,
-): () => void {
-  return openStream(
-    `/api/store/${encodeURIComponent(id)}/install/ws`,
-    (raw) => {
-      try {
-        onEvent(JSON.parse(raw) as InstallEvent)
-      } catch {
-        /* ignore malformed frame */
-      }
-    },
-    onClose,
-  )
-}

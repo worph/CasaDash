@@ -7,11 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/coder/websocket"
 	"github.com/go-chi/chi/v5"
 
 	"github.com/yundera/casadash/internal/appstore"
-	"github.com/yundera/casadash/internal/installer"
 )
 
 type storeResponse struct {
@@ -71,6 +69,23 @@ func (s *Server) handleRemoveStoreSource(w http.ResponseWriter, r *http.Request)
 	s.applySources(w, r.Context(), kept)
 }
 
+// handleRefreshStoreSource force re-downloads a single store and rebuilds the
+// catalog (one reload per store, triggered from the source list).
+func (s *Server) handleRefreshStoreSource(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "store unavailable"})
+		return
+	}
+	url, ok := decodeURL(w, r)
+	if !ok {
+		return
+	}
+	rc, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+	defer cancel()
+	_ = s.store.RefreshStore(rc, url)
+	writeJSON(w, http.StatusOK, map[string][]string{"sources": s.store.URLs()})
+}
+
 func decodeURL(w http.ResponseWriter, r *http.Request) (string, bool) {
 	var body struct {
 		URL string `json:"url"`
@@ -110,42 +125,20 @@ func (s *Server) handleStoreApp(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, app)
 }
 
-// handleInstall runs a blocking install (no progress) — kept for simple clients.
+// handleInstall starts a detached install and returns immediately. Progress is
+// not streamed on this request: the install runs on a background context (so
+// closing the store panel never cancels it) and its progress rides the live
+// "apps" channel as Download/Start bars on the app's tile (see appsSnapshot).
 func (s *Server) handleInstall(w http.ResponseWriter, r *http.Request) {
 	if s.installer == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "install unavailable"})
 		return
 	}
-	id := chi.URLParam(r, "id")
-	if err := s.installer.Install(r.Context(), id, nil); err != nil {
+	project, err := s.installer.StartInstall(chi.URLParam(r, "id"))
+	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 	s.broadcastApps()
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
-// handleInstallWS runs an install over a WebSocket, streaming progress events.
-func (s *Server) handleInstallWS(w http.ResponseWriter, r *http.Request) {
-	if s.installer == nil {
-		http.Error(w, "install unavailable", http.StatusServiceUnavailable)
-		return
-	}
-	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{OriginPatterns: []string{"*"}})
-	if err != nil {
-		return
-	}
-	defer conn.Close(websocket.StatusNormalClosure, "")
-	ctx := conn.CloseRead(r.Context())
-
-	send := func(ev installer.Event) {
-		if raw, err := json.Marshal(ev); err == nil {
-			_ = conn.Write(ctx, websocket.MessageText, raw)
-		}
-	}
-
-	if err := s.installer.Install(ctx, chi.URLParam(r, "id"), send); err != nil {
-		send(installer.Event{Phase: "error", Message: err.Error()})
-	}
-	s.broadcastApps()
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "started", "id": project})
 }

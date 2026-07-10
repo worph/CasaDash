@@ -68,6 +68,9 @@ services:
       # available to that app's ${VAR} label/env interpolation — same contract as
       # casa-img. SSO apps' caddy_* labels + OIDC config resolve against these.
       DOMAIN: "${DOMAIN}"
+      # lowercase alias: store apps' x-compose-app webui-host uses ${domain}
+      # (casa-img sets this too). Silences compose's "domain not set" warning.
+      domain: "${DOMAIN}"
       PUBLIC_IP: "${PUBLIC_IP}"
       PUBLIC_IP_DASH: "${PUBLIC_IP_DASH}"
       PUBLIC_IPV4: "${PUBLIC_IP}"

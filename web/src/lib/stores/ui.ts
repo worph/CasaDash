@@ -11,3 +11,8 @@ export const settingsApp = writable<{ id: string; name: string; managed: boolean
 
 // The app pending uninstall confirmation (null = no dialog).
 export const uninstallTarget = writable<{ id: string; name: string } | null>(null)
+
+// True while a tile is being dragged (and for one tick after the drop). A mouse
+// drop still fires a trailing `click` on the tile, which would otherwise open the
+// app; tiles consult this flag in their click handler so a reorder never opens.
+export const tileDragging = writable(false)

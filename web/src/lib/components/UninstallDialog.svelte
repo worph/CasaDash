@@ -5,7 +5,7 @@
 
   let { target }: { target: { id: string; name: string } } = $props()
 
-  let archive = $state(false)
+  let zip = $state(false)
   let busy = $state(false)
   let error = $state('')
 
@@ -17,7 +17,7 @@
     busy = true
     error = ''
     try {
-      await uninstallApp(target.id, archive)
+      await uninstallApp(target.id, zip)
       uninstallTarget.set(null)
     } catch (e) {
       error = String(e)
@@ -30,19 +30,21 @@
   <div class="dialog" onclick={(e) => e.stopPropagation()} role="presentation">
     <h2>{$t('uninstall')} {target.name}?</h2>
     <p class="body">
-      This removes the app and its containers.
+      This stops and removes the app's containers. Your data is never deleted — the app's
+      folder is renamed to <code>{target.id}.&lt;date&gt;.archive</code> in <code>AppData/</code>.
     </p>
 
     <label class="check">
-      <input type="checkbox" bind:checked={archive} disabled={busy} />
-      <span>Archive &amp; remove app data</span>
+      <input type="checkbox" bind:checked={zip} disabled={busy} />
+      <span>Compress the archive to a <code>.zip</code></span>
     </label>
     <p class="note">
-      {#if archive}
-        The app's data folder will be zipped to a <code>.zip</code> in <code>AppData/</code>, then
-        deleted.
+      {#if zip}
+        The folder is zipped to <code>{target.id}.&lt;date&gt;.archive.zip</code>, then the original
+        folder is removed. Restore by unzipping it back to <code>{target.id}</code>.
       {:else}
-        The app's data folder is kept untouched.
+        The folder is renamed (kept as-is). Restore by renaming it back to
+        <code>{target.id}</code>.
       {/if}
     </p>
 

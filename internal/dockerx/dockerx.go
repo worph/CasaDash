@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"sort"
+	"strings"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
@@ -58,7 +60,24 @@ type Container struct {
 	WorkingDir  string
 	ConfigFiles string
 	State       string // running, exited, created, ...
+	Health      string // healthy | unhealthy | starting | "" (no health check)
 	Ports       []Port
+}
+
+// parseHealth extracts a container health check verdict from the ContainerList
+// summary Status string (e.g. "Up 2 minutes (healthy)"). Docker doesn't surface
+// health as its own field on the list summary, so we read the parenthetical.
+func parseHealth(status string) string {
+	switch {
+	case strings.Contains(status, "(healthy)"):
+		return "healthy"
+	case strings.Contains(status, "(unhealthy)"):
+		return "unhealthy"
+	case strings.Contains(status, "(health: starting)"):
+		return "starting"
+	default:
+		return ""
+	}
 }
 
 // ListProjectContainers returns all containers that belong to a compose project.
@@ -86,6 +105,7 @@ func (c *Client) ListProjectContainers(ctx context.Context) ([]Container, error)
 			WorkingDir:  ct.Labels[labelWorkingDir],
 			ConfigFiles: ct.Labels[labelConfigFile],
 			State:       ct.State,
+			Health:      parseHealth(ct.Status),
 			Ports:       ports,
 		})
 	}
@@ -226,6 +246,68 @@ func (c *Client) FirstContainerID(ctx context.Context, project string) (string, 
 		return "", err
 	}
 	return ids[0], nil
+}
+
+// Service is one compose service's container, with its live state and health.
+type Service struct {
+	Service string `json:"service"`
+	ID      string `json:"container_id"`
+	State   string `json:"state"`  // running, exited, created, ...
+	Health  string `json:"health"` // "", starting, healthy, unhealthy
+}
+
+// ProjectServices lists every container in a compose project as a service,
+// including its health-check status — so the UI can reflect a multi-service
+// stack rather than a single container.
+func (c *Client) ProjectServices(ctx context.Context, project string) ([]Service, error) {
+	f := filters.NewArgs(filters.Arg("label", labelProject+"="+project))
+	list, err := c.cli.ContainerList(ctx, container.ListOptions{All: true, Filters: f})
+	if err != nil {
+		return nil, err
+	}
+	if len(list) == 0 {
+		return nil, errors.New("no containers for project " + project)
+	}
+	out := make([]Service, 0, len(list))
+	for _, ct := range list {
+		out = append(out, Service{
+			Service: ct.Labels[labelService],
+			ID:      ct.ID,
+			State:   ct.State,
+			Health:  parseHealth(ct.Status),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Service < out[j].Service })
+	return out, nil
+}
+
+// ContainerHealth returns one container's health-check status ("" when it has
+// none). It reads the ContainerList summary rather than a full inspect so the
+// live stats loop can poll it cheaply.
+func (c *Client) ContainerHealth(ctx context.Context, id string) string {
+	f := filters.NewArgs(filters.Arg("id", id))
+	list, err := c.cli.ContainerList(ctx, container.ListOptions{All: true, Filters: f})
+	if err != nil || len(list) == 0 {
+		return ""
+	}
+	return parseHealth(list[0].Status)
+}
+
+// ContainerIDForService resolves the container id for a specific service within
+// a project (the per-service log/stats target).
+func (c *Client) ContainerIDForService(ctx context.Context, project, service string) (string, error) {
+	f := filters.NewArgs(
+		filters.Arg("label", labelProject+"="+project),
+		filters.Arg("label", labelService+"="+service),
+	)
+	list, err := c.cli.ContainerList(ctx, container.ListOptions{All: true, Filters: f})
+	if err != nil {
+		return "", err
+	}
+	if len(list) == 0 {
+		return "", errors.New("no container for service " + service)
+	}
+	return list[0].ID, nil
 }
 
 // ContainerLogs returns the (multiplexed) log stream for a container.

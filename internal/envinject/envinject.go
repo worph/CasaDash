@@ -10,6 +10,7 @@ package envinject
 import (
 	"os"
 	"path"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -17,9 +18,10 @@ import (
 	"github.com/yundera/casadash/internal/config"
 )
 
-// Env returns the process environment plus the base interpolation variables so
-// that `docker compose` resolves ${PUID}, ${DATA_ROOT}, ${AppID}, etc.
-func Env(cfg config.Config, appID string) []string {
+// BaseVars returns the CasaOS/casa-img base interpolation variables for an app
+// (PUID, PGID, TZ, DATA_ROOT, REF_*, AppID, …). These are what `docker compose`
+// substitutes into ${VAR} references and what CasaDash seeds an app's .env with.
+func BaseVars(cfg config.Config, appID string) map[string]string {
 	tz := cfg.TZ
 	if tz == "" {
 		tz = "UTC"
@@ -41,12 +43,38 @@ func Env(cfg config.Config, appID string) []string {
 	addIf(extra, "REF_SCHEME", cfg.RefScheme)
 	addIf(extra, "REF_DOMAIN", cfg.RefDomain)
 	addIf(extra, "REF_SEPARATOR", cfg.RefSep)
+	return extra
+}
 
+// Env returns the process environment plus the base interpolation variables so
+// that `docker compose` resolves ${PUID}, ${DATA_ROOT}, ${AppID}, etc.
+func Env(cfg config.Config, appID string) []string {
 	env := os.Environ()
-	for k, v := range extra {
+	for k, v := range BaseVars(cfg, appID) {
 		env = append(env, k+"="+v)
 	}
 	return env
+}
+
+// EnvFile renders the base variables as the contents of an app's .env file
+// (sorted `KEY=VALUE` lines). CasaDash prefills this on install so the app's
+// compose resolves offline and the operator can hand-edit it afterwards — the
+// .env is the app's persistent variable record. See docs/app-model.md.
+func EnvFile(cfg config.Config, appID string) []byte {
+	vars := BaseVars(cfg, appID)
+	keys := make([]string, 0, len(vars))
+	for k := range vars {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, k := range keys {
+		b.WriteString(k)
+		b.WriteByte('=')
+		b.WriteString(vars[k])
+		b.WriteByte('\n')
+	}
+	return []byte(b.String())
 }
 
 // Transform applies the PCS structural rewrites to a store compose file:
@@ -224,9 +252,14 @@ func attachExternalNetwork(doc, services map[string]any, mainService, refNet str
 	}
 	switch nets := svc["networks"].(type) {
 	case []any:
+		for _, n := range nets {
+			if s, ok := n.(string); ok && s == refNet {
+				return // already attached — avoid a duplicate list entry
+			}
+		}
 		svc["networks"] = append(nets, refNet)
 	case map[string]any:
-		nets[refNet] = nil
+		nets[refNet] = nil // idempotent
 	default:
 		svc["networks"] = []any{refNet}
 	}

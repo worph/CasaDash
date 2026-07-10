@@ -1,8 +1,9 @@
 <script lang="ts">
+  import { get } from 'svelte/store'
   import { clickOutside } from '../actions'
-  import { appAction, openApp, type App } from '../stores/apps'
+  import { appAction, openApp, appUrl, type App } from '../stores/apps'
   import { removeLink, type Link } from '../stores/links'
-  import { storeOpen, settingsApp, uninstallTarget } from '../stores/ui'
+  import { storeOpen, settingsApp, uninstallTarget, tileDragging } from '../stores/ui'
   import { t } from '../i18n'
 
   export type TileData =
@@ -22,11 +23,32 @@
     tile.kind === 'app' ? tile.app.icon : tile.kind === 'link' ? (tile.link.icon ?? '') : '',
   )
   const stopped = $derived(tile.kind === 'app' && tile.app.status === 'stopped')
+  // A lifecycle operation is running on this stack: the tile is greyed with a
+  // "…" overlay and its burger menu is suppressed until the op settles.
+  const busy = $derived(tile.kind === 'app' && tile.app.busy === true)
+  // A store install is in flight: the tile is greyed and shows two progress bars
+  // — download (image pull) then start (Docker bring-up). Mirrors the store card.
+  const installing = $derived(tile.kind === 'app' && tile.app.installing === true)
+  const installError = $derived(tile.kind === 'app' ? (tile.app.install_error ?? '') : '')
+  const download = $derived(tile.kind === 'app' ? (tile.app.download ?? 0) : 0)
+  const startPct = $derived(tile.kind === 'app' ? (tile.app.start ?? 0) : 0)
+  // While installing the tile is not clickable (nothing to open yet).
+  const locked = $derived(busy || installing)
+  // An app is openable only when we can build a click URL for it. Apps without a
+  // reachable address (no gateway route and no published port) can't be opened —
+  // the tile is greyed and its click is disabled. Stopped apps that DO have a URL
+  // stay clickable: opening one lands on the launch gate, which starts it.
+  const openable = $derived(tile.kind !== 'app' || appUrl(tile.app) !== '')
 
   function open() {
+    // A drag that just dropped fires a trailing click on this tile; swallow it so
+    // reordering never opens the app. Genuine clicks never set this flag.
+    if (get(tileDragging)) return
     if (tile.kind === 'system') storeOpen.set(true)
-    else if (tile.kind === 'app') openApp(tile.app)
-    else window.open(tile.link.url, '_blank', 'noopener')
+    else if (tile.kind === 'app') {
+      if (!openable) return
+      openApp(tile.app)
+    } else window.open(tile.link.url, '_blank', 'noopener')
   }
 
   async function act(action: 'start' | 'stop' | 'restart') {
@@ -44,10 +66,10 @@
   }
 </script>
 
-<div class="tile" class:stopped>
+<div class="tile" class:stopped class:busy={locked} class:unavailable={!openable}>
   <div class="glass"></div>
 
-  {#if tile.kind !== 'system'}
+  {#if tile.kind !== 'system' && !locked}
     <button
       class="burger"
       aria-label="Menu"
@@ -60,9 +82,17 @@
     </button>
   {/if}
 
-  {#if menuOpen}
+  {#if busy && !installing}
+    <span class="spinner" title="Working…">…</span>
+  {/if}
+
+  {#if installError}
+    <span class="failed" title={installError}>!</span>
+  {/if}
+
+  {#if menuOpen && !locked}
     <div class="menu" use:clickOutside={() => (menuOpen = false)}>
-      <button onclick={() => { menuOpen = false; open() }}>{$t('open')}</button>
+      <button disabled={!openable} onclick={() => { menuOpen = false; open() }}>{$t('open')}</button>
       {#if tile.kind === 'app'}
         <button
           onclick={() => {
@@ -84,10 +114,10 @@
     </div>
   {/if}
 
-  <button class="body" onclick={open}>
+  <button class="body" onclick={open} disabled={!openable || locked} title={openable ? '' : 'No reachable web address'}>
     <div class="icon">
       {#if tile.kind === 'system'}
-        <svg viewBox="0 0 24 24" width="34" height="34" fill="currentColor" aria-hidden="true"><path d="M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z"/></svg>
+        <img src="/img/appstore.svg" alt="" />
       {:else if icon && !imgFailed}
         <img src={icon} alt="" onerror={() => (imgFailed = true)} />
       {:else}
@@ -97,11 +127,26 @@
     <span class="title one-line">{name}</span>
   </button>
 
-  {#if tile.kind === 'app' && !tile.app.managed}
+  {#if installing}
+    <div class="progress">
+      <span class="plabel one-line">
+        {download < 100 ? $t('downloading') : $t('starting_up')}
+        {Math.round(download < 100 ? download : startPct)}%
+      </span>
+      <div class="pbar"><span class="pfill dl" style:width={`${download}%`}></span></div>
+      <div class="pbar"><span class="pfill st" style:width={`${startPct}%`}></span></div>
+    </div>
+  {/if}
+
+  {#if tile.kind === 'app' && !tile.app.managed && !installing}
     <span class="badge">{$t('unmanaged')}</span>
   {/if}
-  {#if tile.kind === 'app' && tile.app.status !== 'stopped'}
-    <span class="dot" class:partial={tile.app.status === 'partial'} title={tile.app.status}></span>
+  {#if tile.kind === 'app' && tile.app.health}
+    <span
+      class="dot"
+      class:unhealthy={tile.app.health !== 'healthy'}
+      title={tile.app.health}
+    ></span>
   {/if}
 </div>
 
@@ -129,6 +174,9 @@
     border: none;
     color: inherit;
     padding: 0.5rem;
+    /* Inherit the .cell grab/grabbing cursor: the tile drags to reorder and a
+       plain click opens it. Disabled/busy states override this below. */
+    cursor: inherit;
   }
   .icon {
     width: 64px;
@@ -147,9 +195,107 @@
     border-radius: var(--radius-icon);
   }
   .stopped .icon img,
-  .stopped .icon {
+  .stopped .icon,
+  .busy .icon img,
+  .busy .icon {
     filter: grayscale(1);
     opacity: 0.7;
+  }
+  /* Busy overlay — a large pulsing "…" filling the tile over the greyed icon,
+     matching CasaOS's lifecycle-operation look. */
+  .spinner {
+    position: absolute;
+    inset: 0;
+    z-index: 4;
+    display: grid;
+    place-items: center;
+    color: #fff;
+    font-size: 4rem;
+    line-height: 1;
+    letter-spacing: 0.05em;
+    text-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+    pointer-events: none;
+    animation: blink 1.2s ease-in-out infinite;
+  }
+  @keyframes blink {
+    0%,
+    100% {
+      opacity: 0.35;
+    }
+    50% {
+      opacity: 1;
+    }
+  }
+  .busy .body {
+    cursor: progress;
+  }
+  /* Install progress overlay — two stacked bars (download, then start). */
+  .progress {
+    position: absolute;
+    left: 0.6rem;
+    right: 0.6rem;
+    bottom: 0.55rem;
+    z-index: 4;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    pointer-events: none;
+  }
+  .plabel {
+    font-size: 0.6rem;
+    color: var(--grey-100);
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+    max-width: 100%;
+  }
+  .pbar {
+    height: 5px;
+    border-radius: 3px;
+    background: rgba(255, 255, 255, 0.28);
+    overflow: hidden;
+  }
+  .pfill {
+    display: block;
+    height: 100%;
+    border-radius: 3px;
+    transition: width 0.3s ease;
+  }
+  .pfill.dl {
+    background: var(--casablue);
+  }
+  .pfill.st {
+    background: hsl(118, 60%, 48%);
+  }
+  .failed {
+    position: absolute;
+    top: 0.5rem;
+    right: 0.5rem;
+    z-index: 4;
+    width: 1.3rem;
+    height: 1.3rem;
+    display: grid;
+    place-items: center;
+    border-radius: 50%;
+    background: var(--red);
+    color: #fff;
+    font-size: 0.85rem;
+    font-weight: 700;
+  }
+  .unavailable .icon img,
+  .unavailable .icon {
+    filter: grayscale(1);
+    opacity: 0.45;
+  }
+  .unavailable .title {
+    opacity: 0.5;
+  }
+  .unavailable .body {
+    cursor: not-allowed;
+  }
+  .menu button:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
   }
   .letter {
     font-size: 2rem;
@@ -234,7 +380,7 @@
     border-radius: 50%;
     background: var(--status-running);
   }
-  .dot.partial {
+  .dot.unhealthy {
     background: var(--yellow);
   }
 </style>
