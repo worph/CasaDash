@@ -2,6 +2,7 @@
   import { clickOutside } from '../actions'
   import { settings } from '../stores/settings'
   import { t, languages } from '../i18n'
+  import DomainsField from './DomainsField.svelte'
 
   let open = $state(false)
 
@@ -64,6 +65,8 @@
               {/each}
             </div>
           </div>
+
+          <DomainsField />
         </div>
       {/if}
     </div>

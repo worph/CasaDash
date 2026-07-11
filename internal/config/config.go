@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/yundera/casadash/internal/domains"
 )
 
 // Config is the process-wide runtime configuration.
@@ -35,6 +37,16 @@ type Config struct {
 	TZ   string
 
 	StoreURLs []string // app-store zip URLs (multi-store)
+
+	// Domains returns the additional domains every app is published on, beyond the
+	// primary one its compose already routes (see internal/caddyroutes). It is a
+	// function, not a slice, because the operator edits the list at runtime while
+	// Config is a value copied once at boot — reading it live is what lets a
+	// settings change reach the next `docker compose up` without a restart.
+	//
+	// nil means the feature is unwired (a Config built outside the server), and no
+	// override is ever touched.
+	Domains func() []domains.Domain
 }
 
 // FromEnv builds a Config from environment variables with sensible defaults.

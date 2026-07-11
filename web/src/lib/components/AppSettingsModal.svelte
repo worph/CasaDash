@@ -47,27 +47,32 @@
   }
   let tab = $state<Tab>(managed ? 'tips' : 'logs')
 
-  // The Override tab is one thing seen three ways: the friendly form, the file it
-  // writes, and what Compose makes of base + override together. The form is the
-  // default — the YAML is there when the form can't express something.
-  type View = 'form' | 'yaml' | 'effective'
-  const views: View[] = ['form', 'yaml', 'effective']
-  const viewLabel: Record<View, string> = { form: 'Form', yaml: 'YAML', effective: 'Effective' }
+  // Two tabs, two views each, split by what you can do to them:
+  //   Override — Form | YAML,      both editable, both the same override file.
+  //   Compose  — Store | Effective, both read-only.
+  type View = 'form' | 'yaml'
+  const views: View[] = ['form', 'yaml']
+  const viewLabel: Record<View, string> = { form: 'Form', yaml: 'YAML' }
   let view = $state<View>('form')
+
+  type ComposeView = 'store' | 'effective'
+  const composeViews: ComposeView[] = ['store', 'effective']
+  const composeViewLabel: Record<ComposeView, string> = { store: 'Store', effective: 'Effective' }
+  let composeView = $state<ComposeView>('store')
 
   // Effective config — `docker compose config` over base + override, loaded when
   // the view is first opened and after every save that could change it.
   let effective = $state('')
   let effectiveMsg = $state('')
   $effect(() => {
-    if (tab !== 'override' || view !== 'effective' || effective) return
+    if (tab !== 'compose' || composeView !== 'effective' || effective) return
     effectiveConfig(id)
       .then((c) => (effective = c))
       .catch((e) => (effectiveMsg = String(e)))
   })
 
-  // The three views read the same two files, so a save through any of them has to
-  // refresh the other two: the YAML the form just wrote, and the merge it changed.
+  // Form and YAML read the same file, so a save through either has to refresh the
+  // other — and the merge that the Compose tab's Effective view shows.
   async function afterOverrideSave() {
     effective = ''
     await loadConfig()
@@ -464,11 +469,30 @@
           </div>
         {/if}
       {:else if tab === 'compose'}
-        <p class="hint">
-          The strict <code>docker-compose.yml</code> as shipped by the store — <strong>read-only</strong>.
-          CasaDash never modifies it, so updates stay clean.
-        </p>
-        <pre class="code readonly">{baseCompose || (configLoaded ? '(empty)' : 'Loading…')}</pre>
+        <div class="views">
+          {#each composeViews as v (v)}
+            <button class:active={composeView === v} onclick={() => (composeView = v)}>
+              {composeViewLabel[v]}
+            </button>
+          {/each}
+        </div>
+
+        {#if composeView === 'store'}
+          <p class="hint">
+            The strict <code>docker-compose.yml</code> as shipped by the store —
+            <strong>read-only</strong>. CasaDash never modifies it, so updates stay clean; your
+            changes live in the <strong>Override</strong> tab instead.
+          </p>
+          <pre class="code readonly">{baseCompose || (configLoaded ? '(empty)' : 'Loading…')}</pre>
+        {:else}
+          <p class="hint">
+            What Compose actually runs: the store's compose and your override merged, with every
+            <code>{'${VAR}'}</code> resolved from the <code>.env</code> —
+            <strong>read-only</strong>. Read this when an override doesn't do what you expected: it
+            shows which of the store's values survived and which yours replaced.
+          </p>
+          <pre class="code readonly">{effective || effectiveMsg || 'Loading…'}</pre>
+        {/if}
       {:else if tab === 'override'}
         <div class="views">
           {#each views as v (v)}
@@ -478,7 +502,7 @@
 
         {#if view === 'form'}
           <OverrideForm {id} onsaved={afterOverrideSave} />
-        {:else if view === 'yaml'}
+        {:else}
           <p class="hint">
             Your edits, layered on top via Compose override semantics. The running stack is
             <code>docker-compose.yml</code> + this override. The <strong>Form</strong> view writes
@@ -499,14 +523,6 @@
               {savingOverride ? 'Saving…' : 'Save & recreate'}
             </button>
           </div>
-        {:else}
-          <p class="hint">
-            What Compose actually runs: <code>docker-compose.yml</code> and your override merged,
-            with every <code>{'${VAR}'}</code> resolved from the <code>.env</code> —
-            <strong>read-only</strong>. This is the file to read when an override doesn't do what
-            you expected.
-          </p>
-          <pre class="code readonly">{effective || effectiveMsg || 'Loading…'}</pre>
         {/if}
       {:else if tab === 'update'}
         <p class="hint">

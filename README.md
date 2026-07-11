@@ -63,6 +63,7 @@ The README is the overview. These three are **authoritative** and win on any con
 | [`docs/app-model.md`](./docs/app-model.md) | Where an app **lives** on disk and how its tile state is derived. Start here. |
 | [`docs/lifecycle.md`](./docs/lifecycle.md) | What install / start / update / save / uninstall actually **do**, in order, and their failure semantics. |
 | [`docs/x-compose-app.md`](./docs/x-compose-app.md) | CasaDash's own compose extension: `folders`, `hooks`, and the resolved web-UI URL. |
+| [`docs/domains.md`](./docs/domains.md) | The **additional domains** apps are published on (`sslip.io` / `nip.io` / your own), and the Caddy routes CasaDash generates for them. |
 | [`docs/FEATURE-COMPARISON.md`](./docs/FEATURE-COMPARISON.md) | Row-by-row scope table vs `casa-img`. |
 
 > **Reference implementation:** the full CasaOS bundle CasaDash slims down lives at

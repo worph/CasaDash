@@ -42,12 +42,19 @@ type Server struct {
 // dashboard (apps endpoints report the connection error).
 func New(cfg config.Config, uiFS fs.FS) http.Handler {
 	collector := system.NewCollector(cfg.DataRoot)
+	settings := usersettings.New(filepath.Join(cfg.StateDir(), "settings.json"))
+
+	// Apps are published on the operator's additional domains, and they edit that
+	// list at runtime — so the Config every layer below copies reads it live rather
+	// than snapshotting it at boot. See internal/caddyroutes.
+	cfg.Domains = settings.Domains
+
 	s := &Server{
 		cfg:       cfg,
 		uiFS:      uiFS,
 		collector: collector,
 		hub:       live.NewHub(collector),
-		settings:  usersettings.New(filepath.Join(cfg.StateDir(), "settings.json")),
+		settings:  settings,
 	}
 
 	if dx, err := dockerx.New(); err != nil {
@@ -117,6 +124,7 @@ func New(cfg config.Config, uiFS fs.FS) http.Handler {
 
 		r.Get("/settings", s.handleGetSettings)
 		r.Put("/settings", s.handlePutSettings)
+		r.Put("/settings/domains", s.handlePutDomains)
 	})
 
 	r.Handle("/*", spaHandler(uiFS))

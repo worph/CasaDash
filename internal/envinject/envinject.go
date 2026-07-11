@@ -123,6 +123,57 @@ func EnvFileVars(b []byte) map[string]string {
 	return out
 }
 
+// SeedVars appends the named variables to an app's .env when they are missing,
+// taking each value from the environment CasaDash itself runs with.
+//
+// An app's compose references deployment variables that live in CasaDash's
+// environment but not in its own base variables — the Caddy labels are templated
+// with ${APP_DOMAIN} and ${APP_PUBLIC_IP_DASH}. `docker compose` run *by CasaDash*
+// resolves those from the process environment (see Env), but a `docker compose
+// up -d` the operator runs by hand in the app's folder has only the .env, and
+// would resolve them to nothing — silently routing the app at an empty host.
+// Seeding them keeps the folder self-contained, which is the whole promise of the
+// app model.
+//
+// Only missing keys are added, and nothing is reordered or rewritten: the .env is
+// the operator's file, and a value they changed by hand must win over the ambient
+// one, on every up, forever.
+func SeedVars(cfg config.Config, appID, envPath string, keys []string) error {
+	raw, err := os.ReadFile(envPath)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	have := EnvFileVars(raw)
+	vars := BaseVars(cfg, appID)
+
+	var add strings.Builder
+	for _, k := range keys {
+		if _, ok := have[k]; ok {
+			continue
+		}
+		v, ok := vars[k]
+		if !ok {
+			v = os.Getenv(k)
+		}
+		if v == "" {
+			continue // nothing to seed it with — leave the reference unresolved
+		}
+		add.WriteString(k)
+		add.WriteByte('=')
+		add.WriteString(v)
+		add.WriteByte('\n')
+	}
+	if add.Len() == 0 {
+		return nil
+	}
+
+	out := raw
+	if len(out) > 0 && !strings.HasSuffix(string(out), "\n") {
+		out = append(out, '\n')
+	}
+	return os.WriteFile(envPath, append(out, add.String()...), 0o644)
+}
+
 // Transform applies the PCS structural rewrites to a store compose file:
 //   - rewrite volume sources under /DATA to the configured DATA_ROOT
 //   - attach the main service to the external REF_NET network (if set)

@@ -35,11 +35,12 @@
 package overrideform
 
 import (
-	"bytes"
 	"fmt"
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/yundera/casadash/internal/yamlnode"
 )
 
 // Tags Compose understands in an override file.
@@ -194,18 +195,7 @@ func Apply(base, override []byte, form *Form) ([]byte, error) {
 		return nil, nil
 	}
 
-	// Two-space indent: yaml.Marshal's default is four, which would silently
-	// re-indent a hand-written override on the first save through the form.
-	var buf bytes.Buffer
-	enc := yaml.NewEncoder(&buf)
-	enc.SetIndent(2)
-	if err := enc.Encode(overRoot); err != nil {
-		return nil, err
-	}
-	if err := enc.Close(); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
+	return yamlnode.Encode(overRoot)
 }
 
 // --- field readers ---
@@ -364,24 +354,7 @@ func applyEnv(b, o *yaml.Node, want []EnvVar) {
 // --- node readers ---
 
 // root returns a compose file's top-level mapping, empty when the file is.
-func root(b []byte) (*yaml.Node, error) {
-	empty := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
-	if len(strings.TrimSpace(string(b))) == 0 {
-		return empty, nil
-	}
-	var doc yaml.Node
-	if err := yaml.Unmarshal(b, &doc); err != nil {
-		return nil, err
-	}
-	if doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 {
-		return empty, nil
-	}
-	n := doc.Content[0]
-	if n.Kind != yaml.MappingNode {
-		return nil, fmt.Errorf("top level is not a mapping")
-	}
-	return n, nil
-}
+func root(b []byte) (*yaml.Node, error) { return yamlnode.Root(b) }
 
 // serviceNames lists the project's services, base order first so the form's tabs
 // match the store's file, then any the override adds on its own.
@@ -413,17 +386,7 @@ func serviceNode(rootNode *yaml.Node, name string) *yaml.Node {
 // ensureService returns the override's mapping for a service, creating it (and
 // the `services` block) if the override doesn't mention it yet.
 func ensureService(rootNode *yaml.Node, name string) *yaml.Node {
-	svcs := mapGet(rootNode, "services")
-	if svcs == nil || svcs.Kind != yaml.MappingNode {
-		svcs = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
-		mapSet(rootNode, "services", svcs)
-	}
-	svc := mapGet(svcs, name)
-	if svc == nil || svc.Kind != yaml.MappingNode {
-		svc = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
-		mapSet(svcs, name, svc)
-	}
-	return svc
+	return yamlnode.EnsureMap(yamlnode.EnsureMap(rootNode, "services"), name)
 }
 
 // scalarValue reads a plain scalar. A node that is anything else (a list-form
@@ -511,51 +474,10 @@ func renderNode(n *yaml.Node) string {
 
 // --- node writers ---
 
-func mapGet(m *yaml.Node, key string) *yaml.Node {
-	if m == nil || m.Kind != yaml.MappingNode {
-		return nil
-	}
-	for i := 0; i+1 < len(m.Content); i += 2 {
-		if m.Content[i].Value == key {
-			return m.Content[i+1]
-		}
-	}
-	return nil
-}
-
-// mapSet replaces a key's value in place — keeping its position, and the comments
-// attached to it — or appends the key when it is new.
-func mapSet(m *yaml.Node, key string, val *yaml.Node) {
-	if m == nil {
-		return
-	}
-	for i := 0; i+1 < len(m.Content); i += 2 {
-		if m.Content[i].Value == key {
-			val.HeadComment = m.Content[i+1].HeadComment
-			val.LineComment = m.Content[i+1].LineComment
-			val.FootComment = m.Content[i+1].FootComment
-			m.Content[i+1] = val
-			return
-		}
-	}
-	m.Content = append(m.Content, scalarNode(key), val)
-}
-
-func mapDelete(m *yaml.Node, key string) {
-	if m == nil {
-		return
-	}
-	for i := 0; i+1 < len(m.Content); i += 2 {
-		if m.Content[i].Value == key {
-			m.Content = append(m.Content[:i], m.Content[i+2:]...)
-			return
-		}
-	}
-}
-
-func scalarNode(v string) *yaml.Node {
-	return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: v}
-}
+func mapGet(m *yaml.Node, key string) *yaml.Node      { return yamlnode.Get(m, key) }
+func mapSet(m *yaml.Node, key string, val *yaml.Node) { yamlnode.Set(m, key, val) }
+func mapDelete(m *yaml.Node, key string)              { yamlnode.Delete(m, key) }
+func scalarNode(v string) *yaml.Node                  { return yamlnode.Scalar(v) }
 
 func seqNode(items []string, tag string) *yaml.Node {
 	n := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}

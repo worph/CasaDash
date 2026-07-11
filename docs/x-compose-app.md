@@ -164,6 +164,25 @@ x-compose-app:
 
 ---
 
+## Reserved keys CasaDash writes
+
+Two keys in an *installed* app's **override** are CasaDash's own bookkeeping rather
+than author fields. They are listed here so a store author doesn't reuse the names,
+and so an operator reading the file knows what they are:
+
+| Key | Written by |
+|---|---|
+| `store` / `store-app-id` | The install, recording where the app came from so it can be updated later. |
+| `x-casadash-routes` | Route generation: the Caddy label keys CasaDash added to publish the app on the deployment's **additional domains**, and will delete before rewriting them. See [`domains.md`](./domains.md). |
+
+Route generation is the other reason to keep `webui-host` and the app's `caddy_N`
+label the same string. CasaDash clones the app's **Caddy route group** onto every
+additional domain the deployment answers on (`sslip.io`, `nip.io`, …), so an app
+that declares its route in labels is reachable at all of them with no extra field
+here — and its click URL keeps mirroring the route it was cloned from.
+
+---
+
 ## The stack-up sequence
 
 `folders` and `hooks` hang off one sequence, which **every** `docker compose up`

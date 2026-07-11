@@ -2,18 +2,30 @@ import { writable, derived } from 'svelte/store'
 import { api } from '../api/client'
 import { locale } from '../i18n'
 
+// An additional domain every app is published on, on top of the primary one its
+// compose already routes. `domain` stays templated (`${APP_PUBLIC_IP_DASH}.sslip.io`):
+// it goes into the app's Caddy label as-is and is resolved by compose, so the
+// route follows the box changing IP.
+export interface Domain {
+  name: string
+  domain: string
+  directives?: Record<string, string>
+}
+
 // Operator preferences, persisted server-side via /api/settings so they follow
 // the server rather than a single browser.
 export interface Settings {
   wallpaper: string
   language: string
   widgets: Record<string, boolean>
+  domains: Domain[]
 }
 
 const DEFAULTS: Settings = {
   wallpaper: '/wallpapers/default_wallpaper.jpg',
   language: 'en_us',
   widgets: { clock: true, system: true, storage: true },
+  domains: [],
 }
 
 export const settings = writable<Settings>({ ...DEFAULTS })
@@ -42,5 +54,19 @@ settings.subscribe((s) => {
     api.put('/api/settings', s).catch(() => {})
   }, 400)
 })
+
+/**
+ * Replace the additional domains apps are published on.
+ *
+ * Domains have their own endpoint rather than riding the debounced save above:
+ * the server rewrites every app's Caddy labels and recreates its containers to
+ * pick them up, which is not something to fire off between keystrokes. Resolves
+ * once the settings are saved — the republish continues in the background, and
+ * the tiles show it.
+ */
+export async function saveDomains(list: Domain[]): Promise<void> {
+  const saved = await api.put<Domain[]>('/api/settings/domains', list)
+  settings.update((s) => ({ ...s, domains: saved ?? [] }))
+}
 
 export const wallpaper = derived(settings, ($s) => $s.wallpaper)

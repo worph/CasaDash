@@ -92,7 +92,12 @@ func merge(base, over map[string]any) map[string]any {
 // whose precondition doesn't hold must not start. A failing post_up is logged and
 // swallowed: the stack is already running and tearing it back down would be worse
 // than a broken after-the-fact tweak.
+//
+// The app's generated Caddy routes are reconciled first, so every path into the
+// stack — install, start, store update, a config or .env save, an added domain —
+// publishes it on the domains the deployment currently answers on. See SyncRoutes.
 func Up(ctx context.Context, cfg config.Config, project, dir string, files []string) error {
+	files = SyncRoutes(cfg, project, dir, files)
 	spec := Load(files)
 
 	if err := Prepare(cfg, project, dir, files, spec); err != nil {

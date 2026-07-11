@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/yundera/casadash/internal/domains"
 )
 
 // Settings is the persisted preference set.
@@ -15,6 +17,11 @@ type Settings struct {
 	Language     string          `json:"language"`
 	Widgets      map[string]bool `json:"widgets"`
 	StoreSources []string        `json:"store_sources,omitempty"`
+
+	// Domains are the additional domains every app is published on. Empty (the
+	// default) means apps are reachable only at the deployment's primary domain,
+	// exactly as their store compose routes them.
+	Domains []domains.Domain `json:"domains,omitempty"`
 }
 
 // Defaults returns the initial settings.
@@ -52,6 +59,11 @@ func (s *Store) Get() Settings {
 	return s.cur
 }
 
+// Domains returns the additional domains apps are published on. It is the live
+// accessor config.Config carries, so an app coming up after a settings change is
+// routed on the list as it stands now.
+func (s *Store) Domains() []domains.Domain { return s.Get().Domains }
+
 // Set persists new settings.
 func (s *Store) Set(n Settings) error {
 	s.mu.Lock()
@@ -81,6 +93,9 @@ func merge(def, in Settings) Settings {
 	}
 	if in.StoreSources != nil {
 		def.StoreSources = in.StoreSources
+	}
+	if in.Domains != nil {
+		def.Domains = in.Domains
 	}
 	return def
 }

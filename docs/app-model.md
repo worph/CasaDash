@@ -36,7 +36,7 @@ what the dashboard shows.
 | File | Origin | Mutated by | Purpose |
 |------|--------|-----------|---------|
 | `docker-compose.yml` | **Strict copy from the store listing.** | Never — CasaDash treats it as read-only. | The pristine app definition. Keeping it byte-for-byte identical to the store is what lets updates stay clean (re-copy on update, overrides survive). |
-| `docker-compose.override.yml` | Generated from the **per-app config window** (ports, env, volumes, …). | CasaDash, on every config save. | User customizations, layered on top via Compose override semantics. The running stack = `docker-compose.yml` + `docker-compose.override.yml`. |
+| `docker-compose.override.yml` | Generated from the **per-app config window** (ports, env, volumes, …). | CasaDash, on every config save — and on every up, for the routes it generates (see [`domains.md`](./domains.md)). | User customizations, layered on top via Compose override semantics. The running stack = `docker-compose.yml` + `docker-compose.override.yml`. |
 | `.env` | **Prefilled by CasaDash on create** (PUID/PGID, TZ, `REF_*`, domain, generated secrets, …), then hand-editable. | CasaDash on create; user thereafter. | Variable substitution for both compose files. |
 | everything else | The app (bind-mount targets, config files, databases, …). | The app at runtime. | User data. **Never** deleted by CasaDash (see uninstall). |
 
@@ -58,6 +58,11 @@ x-compose-app:
   store-app-id: jellyfin                                                  # catalog id within it
 ```
 
+The same block carries the manifest of the **Caddy routes CasaDash generates** to
+publish the app on the deployment's additional domains (`x-casadash-routes`) — the
+record of which label keys are CasaDash's to rewrite, so regenerating them can
+never touch the operator's. See [`docs/domains.md`](./domains.md).
+
 The per-app **Update** tab uses this to:
 
 1. fetch the store's current listing for `store-app-id` from `store`,
@@ -69,18 +74,19 @@ version and runs `docker compose up -d` (base + override). The override and
 `.env` are never touched. Apps with no recorded reference (installed before this
 feature, or unmanaged stacks) simply report "no update reference".
 
-### Editing the override — form, YAML, effective
+### Editing the override — form and YAML
 
-The settings window's **Override** tab shows the override three ways. All three read
-and write the same file:
+The settings window splits the two compose files by what you can *do* to them:
 
-| View | What it is |
-|---|---|
-| **Form** | Field-by-field editor (image, restart, ports, volumes, environment; devices, cap_add, command, privileged, limits under *Advanced*). Each field shows the store's value as a ghost placeholder and is marked when overridden; clearing a field resets it to the store's. |
-| **YAML** | The `docker-compose.override.yml` itself. Anything the form can't express belongs here. |
-| **Effective** | `docker compose config` over base + override — the merged, interpolated project. Read-only; this is what actually runs. |
+| Tab | View | What it is |
+|---|---|---|
+| **Override** | **Form** | Field-by-field editor (image, restart, ports, volumes, environment; devices, cap_add, command, privileged, limits under *Advanced*). Each field shows the store's value as a ghost placeholder and is marked when overridden; clearing a field resets it to the store's. |
+| **Override** | **YAML** | The `docker-compose.override.yml` itself. Anything the form can't express belongs here. |
+| **Compose** | **Store** | The strict `docker-compose.yml` as shipped. Read-only — CasaDash never modifies it. |
+| **Compose** | **Effective** | `docker compose config` over base + override: the merged, interpolated project. Read-only; this is what actually runs, and the view that answers "what did my override actually *do*" — which of the store's values survived, and which yours replaced. |
 
-The form **patches the override's YAML node tree** rather than regenerating it, so
+Form and YAML are two views of the same file and either can save it. The form
+**patches the override's YAML node tree** rather than regenerating it, so
 comments, key order, and keys it doesn't model (`x-compose-app`, `healthcheck`,
 `depends_on`, …) survive a save untouched.
 
