@@ -53,7 +53,6 @@ type Manager struct {
 	order     []string // stable catalog order
 	cats      []string
 	recommend []string
-	lastETag  map[string]string
 }
 
 // New creates a Manager for the given store URLs, caching under cacheDir.
@@ -62,7 +61,6 @@ func New(urls []string, cacheDir string) *Manager {
 		urls:     urls,
 		cacheDir: cacheDir,
 		catalog:  map[string]*CatalogApp{},
-		lastETag: map[string]string{},
 	}
 }
 
@@ -223,13 +221,12 @@ func (m *Manager) Refresh(ctx context.Context) error {
 	return nil
 }
 
-// RefreshStore forces a re-download of a single store — clearing its cached
-// ETag so syncStore refetches it — then rebuilds the merged catalog. Other
-// stores are re-synced too but skip their download when their ETag is unchanged.
+// RefreshStore forces a re-download of a single store — dropping its cached
+// validators so the conditional GET in syncStore can't come back 304 — then
+// rebuilds the merged catalog. Other stores are re-synced too but skip their
+// download when unchanged.
 func (m *Manager) RefreshStore(ctx context.Context, storeURL string) error {
-	m.mu.Lock()
-	delete(m.lastETag, storeURL)
-	m.mu.Unlock()
+	clearValidators(m.workdir(storeURL))
 	return m.Refresh(ctx)
 }
 
@@ -250,36 +247,20 @@ func (m *Manager) StartAutoRefresh(ctx context.Context, interval time.Duration) 
 	}()
 }
 
-// syncStore downloads+extracts a store zip (skipping if the ETag is unchanged)
-// and returns the store root directory (the parent of the Apps/ folder).
+// syncStore brings the extracted copy of a store up to date and returns its
+// store root (the parent of the Apps/ folder). An unchanged store costs one
+// conditional GET that comes back 304 with no body — see fetch.
 func (m *Manager) syncStore(ctx context.Context, storeURL string) (string, error) {
 	workdir := m.workdir(storeURL)
-	candidates := storeZipCandidates(storeURL)
-	primary := candidates[0]
-
-	if etag, err := headETag(ctx, primary); err == nil && etag != "" {
-		m.mu.RLock()
-		prev := m.lastETag[storeURL]
-		m.mu.RUnlock()
-		if prev == etag {
-			if root, err := findAppsRoot(workdir); err == nil {
-				return root, nil
-			}
-		}
-		defer func() {
-			m.mu.Lock()
-			m.lastETag[storeURL] = etag
-			m.mu.Unlock()
-		}()
-	}
 
 	var lastErr error
-	for _, dl := range candidates {
-		if err := download(ctx, dl, workdir); err != nil {
+	for _, dl := range storeZipCandidates(storeURL) {
+		root, err := m.fetch(ctx, dl, workdir)
+		if err != nil {
 			lastErr = err
 			continue
 		}
-		return findAppsRoot(workdir)
+		return root, nil
 	}
 	// Every candidate failed: fall back to any previously extracted copy.
 	if root, ferr := findAppsRoot(workdir); ferr == nil {
@@ -287,6 +268,130 @@ func (m *Manager) syncStore(ctx context.Context, storeURL string) (string, error
 	}
 	return "", lastErr
 }
+
+// fetch conditionally downloads the store zip at u and extracts it into workdir.
+//
+// Freshness is a conditional GET rather than the HEAD-then-GET the CasaOS
+// reference uses: we replay the ETag / Last-Modified of the copy we already have
+// and let the origin decide. An unchanged store answers 304 with no body, so the
+// hourly refresh of an idle box costs one round-trip and touches no disk. The
+// validators are persisted next to the extracted copy, so this survives a
+// restart — CasaOS keeps them in a struct field and therefore re-downloads the
+// whole store on every boot.
+//
+// The body streams to a temp file and is opened from there. Buffering it in
+// memory instead would cost ~2x the zip (tens of MB per store) on every refresh,
+// which on a small host is the difference between an 18 MB resident process and
+// a 300 MB spike.
+func (m *Manager) fetch(ctx context.Context, u, workdir string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return "", err
+	}
+
+	// Only make the request conditional when there is actually a copy on disk to
+	// fall back on, so a 304 can always be honoured by reusing it.
+	if _, err := findAppsRoot(workdir); err == nil {
+		if v := readValidators(workdir); v.ETag != "" || v.LastModified != "" {
+			if v.ETag != "" {
+				req.Header.Set("If-None-Match", v.ETag)
+			}
+			if v.LastModified != "" {
+				req.Header.Set("If-Modified-Since", v.LastModified)
+			}
+		}
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotModified {
+		return findAppsRoot(workdir)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("store %s: http %d", u, resp.StatusCode)
+	}
+
+	if err := extractStream(resp.Body, workdir); err != nil {
+		return "", err
+	}
+	writeValidators(workdir, validators{
+		ETag:         resp.Header.Get("ETag"),
+		LastModified: resp.Header.Get("Last-Modified"),
+	})
+	return findAppsRoot(workdir)
+}
+
+// extractStream spools r (a zip) to a temp file and extracts it into dest,
+// replacing any prior copy. The spool file is what keeps the zip out of the heap.
+func extractStream(r io.Reader, dest string) error {
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return err
+	}
+	spool, err := os.CreateTemp(filepath.Dir(dest), ".store-*.zip")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(spool.Name())
+	defer spool.Close()
+
+	if _, err := io.Copy(spool, r); err != nil { //nolint:gosec // store content, size-bounded by the origin
+		return err
+	}
+	zr, err := zip.OpenReader(spool.Name())
+	if err != nil {
+		return err
+	}
+	defer zr.Close()
+
+	tmp := dest + ".tmp"
+	_ = os.RemoveAll(tmp)
+	if err := extractZip(&zr.Reader, tmp); err != nil {
+		return err
+	}
+	_ = os.RemoveAll(dest)
+	return os.Rename(tmp, dest)
+}
+
+// validators are the HTTP cache validators of the store copy currently extracted
+// in a workdir, persisted so a restart doesn't re-download an unchanged store.
+type validators struct {
+	ETag         string `json:"etag,omitempty"`
+	LastModified string `json:"last_modified,omitempty"`
+}
+
+// validatorPath is a sibling of workdir, not a file inside it: extractStream
+// swaps the workdir wholesale with a rename, which would take the file with it.
+func validatorPath(workdir string) string { return workdir + ".validators.json" }
+
+func readValidators(workdir string) validators {
+	var v validators
+	b, err := os.ReadFile(validatorPath(workdir))
+	if err != nil {
+		return v
+	}
+	_ = json.Unmarshal(b, &v)
+	return v
+}
+
+func writeValidators(workdir string, v validators) {
+	if v.ETag == "" && v.LastModified == "" {
+		// Origin sent neither: drop any stale file so the next refresh is a plain
+		// unconditional GET rather than one carrying validators for older content.
+		clearValidators(workdir)
+		return
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(validatorPath(workdir), b, 0o644)
+}
+
+func clearValidators(workdir string) { _ = os.Remove(validatorPath(workdir)) }
 
 // storeZipCandidates maps the various GitHub URL forms a user might paste into
 // the codeload archive URL(s) to actually fetch. Supported inputs:

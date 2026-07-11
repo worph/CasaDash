@@ -54,6 +54,19 @@ func NewHub(collector *system.Collector) *Hub {
 	return h
 }
 
+// BroadcastLazy sends the result of produce to every client subscribed to
+// channel, and calls produce only if there is at least one. Building an "apps"
+// payload means a host-wide container list plus a YAML parse per installed app,
+// so an eager Broadcast would pay that on every Docker event even with nobody
+// connected — and Docker events include the health checks of every container on
+// the host, so on an idle box that is a steady drip of work for no reader.
+func (h *Hub) BroadcastLazy(channel string, produce func() any) {
+	if !h.anySubscribed(channel) {
+		return
+	}
+	h.Broadcast(channel, produce())
+}
+
 // Broadcast sends data to every client subscribed to channel.
 func (h *Hub) Broadcast(channel string, data any) {
 	raw, err := json.Marshal(data)

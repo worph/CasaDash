@@ -248,9 +248,11 @@ func throttle(d time.Duration, fn func()) func() {
 	}
 }
 
-// broadcastApps pushes the current app list to "apps" channel subscribers.
+// broadcastApps pushes the current app list to "apps" channel subscribers. The
+// snapshot is built lazily: with no subscriber there is nothing to send and
+// reconciling the list is pure waste (see live.Hub.BroadcastLazy).
 func (s *Server) broadcastApps() {
-	s.hub.Broadcast(live.ChannelApps, s.appsSnapshot())
+	s.hub.BroadcastLazy(live.ChannelApps, s.appsSnapshot)
 }
 
 // watchDocker rebroadcasts the app list on container events, debounced.
@@ -265,7 +267,7 @@ func (s *Server) watchDocker() {
 		})
 		for range trigger {
 			time.Sleep(400 * time.Millisecond) // debounce bursts
-			s.hub.Broadcast(live.ChannelApps, s.appsSnapshot())
+			s.broadcastApps()
 		}
 	}()
 }
