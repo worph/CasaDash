@@ -77,6 +77,52 @@ func EnvFile(cfg config.Config, appID string) []byte {
 	return []byte(b.String())
 }
 
+// Render substitutes ${VAR} / $VAR references in s using the same variables the
+// install-time `docker compose` run sees (Env): the process environment, overlaid
+// with the app's base interpolation variables (BaseVars), overlaid with the
+// KEY=VALUE lines of its persisted .env (operator edits win). References we can't
+// resolve are left intact. Used to render an app's tips for display — store tips
+// routinely reference the ambient vars (APP_DEFAULT_PASSWORD, DOMAIN, …) that
+// only exist in the process environment.
+func Render(s string, cfg config.Config, appID string, envFile []byte) string {
+	vars := map[string]string{}
+	for _, kv := range os.Environ() {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			vars[k] = v
+		}
+	}
+	for k, v := range BaseVars(cfg, appID) {
+		vars[k] = v
+	}
+	for k, v := range EnvFileVars(envFile) {
+		vars[k] = v
+	}
+	return os.Expand(s, func(k string) string {
+		if v, ok := vars[k]; ok {
+			return v
+		}
+		return "${" + k + "}" // leave references we don't own untouched
+	})
+}
+
+// EnvFileVars parses simple KEY=VALUE lines (the format EnvFile writes),
+// skipping blanks and # comments.
+func EnvFileVars(b []byte) map[string]string {
+	out := map[string]string{}
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		out[strings.TrimSpace(k)] = strings.TrimSpace(v)
+	}
+	return out
+}
+
 // Transform applies the PCS structural rewrites to a store compose file:
 //   - rewrite volume sources under /DATA to the configured DATA_ROOT
 //   - attach the main service to the external REF_NET network (if set)
@@ -154,15 +200,7 @@ func VolumeDirs(raw []byte, cfg config.Config) []string {
 // toContainerPath maps a compose bind source to the path CasaDash can create
 // inside its own data mount, or "" if it isn't a data-root bind directory.
 func toContainerPath(src string, cfg config.Config) string {
-	// Resolve the host-path placeholders back to the container mount point.
-	for _, tok := range []string{"${DATA_ROOT}", "$DATA_ROOT", "${DATA_HOST_PATH}", "$DATA_HOST_PATH"} {
-		src = strings.ReplaceAll(src, tok, cfg.DataRoot)
-	}
-	if cfg.DataHostPath != "" && strings.HasPrefix(src, cfg.DataHostPath) {
-		src = cfg.DataRoot + src[len(cfg.DataHostPath):]
-	} else if strings.HasPrefix(src, "/DATA") {
-		src = cfg.DataRoot + src[len("/DATA"):]
-	}
+	src = ContainerPath(src, cfg)
 	// Skip sources with unresolved variables we don't own (e.g. $AppID) — those
 	// are handled by compose interpolation / install hooks, not pre-creation.
 	if strings.Contains(src, "$") {
@@ -179,6 +217,38 @@ func toContainerPath(src string, cfg config.Config) string {
 	return src
 }
 
+// ContainerPath maps a host-side data path (the form written into an app's
+// compose: `/DATA/...`, `${DATA_ROOT}/...`, or the literal host path) to the
+// same location as seen INSIDE this container, so CasaDash can create it through
+// its own data mount. Paths that don't live under the data root are returned
+// unchanged — the caller decides whether to reject them.
+func ContainerPath(src string, cfg config.Config) string {
+	for _, tok := range []string{"${DATA_ROOT}", "$DATA_ROOT", "${DATA_HOST_PATH}", "$DATA_HOST_PATH"} {
+		src = strings.ReplaceAll(src, tok, cfg.DataRoot)
+	}
+	if cfg.DataHostPath != "" && strings.HasPrefix(src, cfg.DataHostPath) {
+		return cfg.DataRoot + src[len(cfg.DataHostPath):]
+	}
+	if strings.HasPrefix(src, "/DATA") {
+		return cfg.DataRoot + src[len("/DATA"):]
+	}
+	return src
+}
+
+// HostPath maps a path inside this container's data mount to the same location as
+// the Docker host sees it — the inverse of ContainerPath. Use it on real paths
+// (an app's directory, a bind source); use RewriteToHostPath on script text, which
+// carries the /DATA and ${DATA_ROOT} spellings instead of a resolved path.
+func HostPath(p string, cfg config.Config) string {
+	if cfg.DataRoot == "" || cfg.DataHostPath == "" || cfg.DataRoot == cfg.DataHostPath {
+		return p
+	}
+	if strings.HasPrefix(p, cfg.DataRoot) {
+		return cfg.DataHostPath + p[len(cfg.DataRoot):]
+	}
+	return p
+}
+
 // RewriteToHostPath replaces literal /DATA and ${DATA_ROOT} references with the
 // host data path. Used on x-casaos install hooks, whose commands run against the
 // host daemon (via DOCKER_HOST) and must therefore use host paths.
@@ -186,10 +256,15 @@ func RewriteToHostPath(s string, cfg config.Config) string {
 	if cfg.DataHostPath == "" || cfg.DataHostPath == "/DATA" {
 		return s
 	}
-	s = strings.ReplaceAll(s, "${DATA_ROOT}", cfg.DataHostPath)
-	s = strings.ReplaceAll(s, "$DATA_ROOT", cfg.DataHostPath)
-	s = strings.ReplaceAll(s, "/DATA", cfg.DataHostPath)
-	return s
+	// One pass, not three ReplaceAll calls: a host path normally *ends* in /DATA
+	// (e.g. /opt/casadash/DATA), so expanding ${DATA_ROOT} first and then rewriting
+	// /DATA would rewrite the path we just wrote — /opt/casadash/opt/casadash/DATA.
+	// A Replacer scans left to right and never re-scans what it emitted.
+	return strings.NewReplacer(
+		"${DATA_ROOT}", cfg.DataHostPath,
+		"$DATA_ROOT", cfg.DataHostPath,
+		"/DATA", cfg.DataHostPath,
+	).Replace(s)
 }
 
 func addIf(m map[string]string, k, v string) {

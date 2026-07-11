@@ -67,7 +67,7 @@ x-compose-app:
 
 | Field | Type | Required | Meaning / CasaDash use | `x-casaos` fallback |
 |---|---|---|---|---|
-| `schema_version` | int | no (default `1`) | Spec version. CasaDash refuses versions it doesn't understand and falls back to `x-casaos`. | — |
+| `schema_version` | int | no (default `1`) | Spec version (currently **2**). CasaDash refuses versions it doesn't understand and falls back to `x-casaos`. v1 files keep working; declare `2` if the app *needs* `folders`/`hooks` to be honoured, so an older CasaDash refuses it instead of silently starting it without its directories. | — |
 | `id` | string | no | Stable app identifier (should equal the Compose project `name`). Defaults to the project name. | `store_app_id` |
 | `title` | string \| localized | no | Tile + store display name. | `title` |
 | `icon` | url | no | Tile icon. | `icon` |
@@ -83,8 +83,9 @@ x-compose-app:
 | `webui-scheme` | `http` \| `https` | no (default `https`) | The URL scheme the **browser** uses. | `scheme` |
 | `webui-path` | string | no (default `/`) | Path appended to the host. May include a query string (e.g. `/?hash=$AUTH_HASH`). | `index` |
 | `links` | object[] | no | Extra buttons on the detail view: `{ name, url, icon? }` with an **absolute** `url`. Never the tile's default action. | — |
-| `tips` | object | no | `{ before_install: string \| localized }` shown in the install dialog. | `tips.before_install` |
-| `hooks` | object | no | `{ pre_install: string, post_install: string }` — host shell at install/uninstall, same contract as `x-casaos` `pre-install-cmd` / `post-install-cmd`. | `pre-install-cmd` / `post-install-cmd` |
+| `tips` | string \| localized | no | Guidance note (Markdown, `${VAR}` references resolved from the app's `.env`) shown from the tile menu. This is where CasaDash writes tips edited in **App settings** — into the **override's** `x-compose-app.tips`, never the store-provided base compose. When set, it replaces the `x-casaos` tips; clearing it falls back to them. | `tips.before_install` + `tips.custom` |
+| **`folders`** | object[] | no | Directories **created and owned before every `up`**. See [Folders](#folders). | — |
+| **`hooks`** | object | no | `{ pre_install, post_install, pre_up, post_up }` — host shell around the app's lifecycle. See [Hooks](#hooks). | `pre-install-cmd` / `post-install-cmd` |
 
 \* `webui-host` is required only to have a **clickable app**. An app with no
 `webui-host` (and no `x-casaos` fallback) is headless — its tile has no "open"
@@ -160,6 +161,176 @@ x-compose-app:
     - name: Docs
       url: https://docs.photoprism.app
 ```
+
+---
+
+## The stack-up sequence
+
+`folders` and `hooks` hang off one sequence, which **every** `docker compose up`
+CasaDash runs goes through — install, start from the tile, store update, and
+saving the app's config all take the same path:
+
+```
+ensure folders  →  pre_up  →  docker compose up -d  →  post_up
+```
+
+`pre_install` / `post_install` bracket that sequence, but only the **first** time —
+during the install itself:
+
+```
+write compose + .env  →  ensure folders  →  pull images
+                      →  pre_install  →  [ the up sequence ]  →  post_install
+```
+
+So a directory declared under `folders` is guaranteed to exist before an image is
+pulled, before any hook runs, and before the containers start — on the first boot
+*and* on every boot after it.
+
+[`lifecycle.md`](./lifecycle.md) is authoritative for these sequences, and covers
+what the other operations (start, restart, update, save, uninstall) do with them.
+
+---
+
+## Folders
+
+Compose creates a missing bind-mount source as an empty **root-owned** directory.
+An app that drops privileges to `PUID:PGID` then can't write to its own config
+volume — the classic "permission denied on first start". `folders` fixes that
+declaratively: CasaDash creates each one and takes ownership of it *before* the
+stack comes up.
+
+```yaml
+x-compose-app:
+  schema_version: 2
+  folders:
+    - /DATA/AppData/${AppID}/config          # shorthand: just a path
+    - path: /DATA/AppData/${AppID}/data      # full form
+      user: "${PUID}"
+      group: "${PGID}"
+      mode: "0750"
+    - path: /DATA/Media
+      group: media
+      recursive: true                        # reclaim what's already in there
+```
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `path` | string | — (required) | Absolute path of the directory, under the data root. Interpolated (see below). |
+| `user` | uid \| name | `${PUID}` | Owning user. |
+| `group` | gid \| name | `${PGID}` | Owning group. |
+| `mode` | octal string | `"0755"` | Permissions of `path` itself. **Must be quoted** — see the trap below. |
+| `recursive` | bool | `false` | Apply `user`/`group` to **everything already inside** `path`, not just `path` itself. |
+
+A list entry may be a bare string (`- /DATA/AppData/app/config`), which means that
+path with every default.
+
+### Interpolation and path resolution
+
+`path`, `user`, `group` and `mode` are interpolated with the same variables the
+app's own compose sees: the base variables (`${DATA_ROOT}`, `${AppID}`, `${PUID}`,
+`${PGID}`, `${REF_*}`, …) overlaid with the app's persisted `.env` — so a folder can
+follow a path the operator configured there.
+
+The path names the **host** location, exactly as a bind-mount source does
+(`/DATA/...`, `${DATA_ROOT}/...`, or the literal host path). CasaDash maps it back
+into its own data mount to create it, so it is correct on both sides of the socket.
+
+Three things make a folder a **declaration error** and fail the up, rather than
+being silently skipped:
+
+- a variable that resolves to nothing (`${NOPE}` left in the path),
+- a relative path,
+- a path outside the data root (`/etc/cron.d`, or `/DATA/../etc`) — the data root is
+  the only host directory CasaDash has mounted, so anything else would quietly
+  create a directory *inside the CasaDash container* and mount an empty one into the
+  app.
+
+Ownership and mode are applied **best-effort**: a filesystem that can't `chown`
+logs a warning rather than blocking an otherwise healthy start.
+
+### `mode` must be quoted
+
+```yaml
+mode: "0755"   # ✅
+mode: 0755     # ❌ YAML types this as an octal *int* — the leading zero is gone
+               #    by the time CasaDash sees it, and the app fails to install.
+```
+
+CasaDash rejects the unquoted form with an error naming the fix rather than
+guessing what `493` was supposed to mean.
+
+### `recursive`
+
+`recursive: true` walks the existing tree and applies `user`/`group` to every entry
+below `path`. Use it when an app must reclaim a directory it didn't create — a
+restored backup, a media library written by another app, a tree an earlier
+root-running version of the app left behind.
+
+It rewrites **ownership only**. `mode` still applies to `path` itself and nothing
+else: rewriting the mode of every file below would flip executable bits the app
+deliberately set for itself.
+
+It is not free — the walk is proportional to the size of the tree, so don't put it
+on a multi-terabyte media folder that is already correct.
+
+---
+
+## Hooks
+
+Shell snippets around the app's lifecycle. Two pairs, differing in **when** they
+fire:
+
+| Hook | Runs |
+|---|---|
+| `pre_install` | Once, when CasaDash installs the app — after the images are pulled, before the first up. |
+| `post_install` | Once, right after that first up succeeds. |
+| `pre_up` | Before **every** `docker compose up` — first install, every later start, update, and config save. |
+| `post_up` | After every `docker compose up`. |
+
+```yaml
+x-compose-app:
+  schema_version: 2
+  hooks:
+    pre_install: |
+      openssl rand -hex 32 > ${DATA_ROOT}/AppData/${AppID}/secrets/key
+    pre_up: |
+      docker pull ghcr.io/example/sidecar:latest
+    post_up: |
+      echo "$AppID up at $(date)" >> /var/log/casadash-apps.log
+```
+
+`pre_install` / `post_install` generalise the CasaOS `pre-install-cmd` /
+`post-install-cmd`, and **win over them** when both are present. A store app that
+carries only `x-casaos` keeps working with no change.
+
+### Failure semantics
+
+- **`pre_install` and `pre_up` are fatal.** A pre-hook is the app's precondition; if
+  it doesn't hold, the stack must not start. A failing `pre_up` blocks the app on
+  *every* start, which is the point — don't put anything flaky in one.
+- **`post_install` and `post_up` are logged and swallowed.** The stack is already
+  running by then, and tearing a healthy app back down over a failed after-the-fact
+  tweak would be worse than the failed tweak.
+
+### Execution environment
+
+Hooks run through `/bin/bash -c` **inside the CasaDash container**, with the working
+directory set to the app's folder, but they talk to the **host** Docker daemon
+(`DOCKER_HOST=unix:///var/run/docker.sock`). They get the app's interpolation
+variables plus its `.env`, `AppID`, and `APP_DIR`.
+
+Because they're aimed at the host daemon, `/DATA` and `${DATA_ROOT}` inside a hook's
+script are rewritten to **host** paths — a `docker run -v` in a hook must name a
+path the host daemon can resolve. The consequence is the one trap worth knowing:
+
+> A hook that just wants a directory to exist should **not** `mkdir` it. Written in a
+> hook, that path is a host path, and the `mkdir` would run in the CasaDash
+> container — creating the wrong directory in the wrong place. Declare it under
+> `folders` instead: those are created through CasaDash's data mount and are correct
+> on both sides.
+
+Hooks are for **Docker-level** work (pulling a sidecar image, priming a volume with
+`docker run`, poking another stack). Directories are what `folders` is for.
 
 ---
 

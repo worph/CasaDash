@@ -10,6 +10,10 @@ registry file — the filesystem and the Docker daemon **are** the state.
 > `AppData/casaos/apps/<app>` nesting described elsewhere. CasaDash uses a **flat**
 > `AppData/<app>` layout.
 
+For what CasaDash *does* to this layout — the install / start / update / save /
+uninstall sequences, and the `folders` and `hooks` that hang off them — see
+[`lifecycle.md`](./lifecycle.md).
+
 ---
 
 ## On-disk layout
@@ -64,6 +68,45 @@ When they differ, **Update now** overwrites the strict base with the store's
 version and runs `docker compose up -d` (base + override). The override and
 `.env` are never touched. Apps with no recorded reference (installed before this
 feature, or unmanaged stacks) simply report "no update reference".
+
+### Editing the override — form, YAML, effective
+
+The settings window's **Override** tab shows the override three ways. All three read
+and write the same file:
+
+| View | What it is |
+|---|---|
+| **Form** | Field-by-field editor (image, restart, ports, volumes, environment; devices, cap_add, command, privileged, limits under *Advanced*). Each field shows the store's value as a ghost placeholder and is marked when overridden; clearing a field resets it to the store's. |
+| **YAML** | The `docker-compose.override.yml` itself. Anything the form can't express belongs here. |
+| **Effective** | `docker compose config` over base + override — the merged, interpolated project. Read-only; this is what actually runs. |
+
+The form **patches the override's YAML node tree** rather than regenerating it, so
+comments, key order, and keys it doesn't model (`x-compose-app`, `healthcheck`,
+`depends_on`, …) survive a save untouched.
+
+**Compose's merge rules are not uniform, and the form speaks them:**
+
+- **Scalars** (`image`, `restart`, …) — the override replaces the base.
+- **Sequences** (`ports`, `volumes`, `devices`, `cap_add`) — the override is
+  **appended** to the base, not substituted for it. A form that merely *listed* the
+  ports you want would therefore keep publishing the store's as well. So: when the
+  form's list only adds to the store's, it writes just the extras; when it **edits
+  or removes** one of the store's, it writes the whole list under Compose's
+  `!override` tag, which replaces the base's outright.
+- **Mappings** (`environment`) — merged key by key. The form writes only the
+  variables that differ from the store's. **Removing** one of the store's variables
+  can't be expressed by a key merge, so that too falls back to `!override`.
+
+`!override` requires Docker Compose **v2.24.4+**.
+
+A construct the form can't represent faithfully — a long-syntax port, a list-form
+`command`, a node tagged by hand — is shown read-only ("edit in the YAML view") and
+is **never rewritten** by a form save. Whether a field is editable is recomputed
+from the files on every save, never trusted from the client.
+
+Every save, from either view, is **validated first** (`docker compose config` over
+base + candidate). An override Compose won't parse is rejected before it is written,
+so a typo can't leave an app that no longer comes up.
 
 ---
 
@@ -131,6 +174,49 @@ data being destroyed.
 
 ---
 
+## Install from backup = uninstall, inverted
+
+Archives are not write-only: the store reads them back. Clicking **Install** on a
+store app first asks the server for that app's archives
+(`GET /api/store/{id}/backups`). With none — the common case — it installs
+straight away, one click as before. With some, it offers them:
+
+```
+┌─────────────────────────────┐
+│ ▸ Fresh install             │
+│                             │
+│ RESTORE FROM BACKUP         │
+│ ▸ 2026-07-10        folder  │
+│ ▸ 2026-06-02  zip · 78.7 MB │
+└─────────────────────────────┘
+```
+
+Picking one posts `{"from_backup": "<archive name>"}` to the install endpoint,
+and the install becomes:
+
+1. **restore** the archive as `AppData/<app>/` — a folder archive is *renamed*
+   back (no copy, and the archive is consumed); a zip is *extracted* (a copy, so
+   the zip survives and can be restored again),
+2. then run the **ordinary install** on top of it.
+
+Nothing about step 2 is special-cased, because the install is already
+non-destructive over what it finds: it overwrites `docker-compose.yml` with the
+store's current version (the strict base is meant to be replaceable) but
+**never clobbers an existing `.env`**, and never touches app data. So the app
+comes back with its old data and its old variables, on a fresh app definition.
+
+The project name is resolved **server-side** (`Installer.ProjectFor`): a store id
+is `Dufs`, but its compose project — and therefore its archive prefix — is `dufs`.
+The client cannot derive this, since the project name may come from the compose
+file's own `name:`.
+
+Restoring **refuses to overwrite a live app** (`AppData/<app>/` already present):
+uninstall it first, which archives today's state, and then restore. That keeps
+the two operations symmetric and means a restore can never destroy the data it is
+about to replace.
+
+---
+
 ## Dot in a name = hidden
 
 `.` is a **reserved character** for CasaDash. Any entry under `AppData/` whose name
@@ -164,6 +250,7 @@ name.
 | Running / stopped / busy / clickable | Live Docker state |
 | Health dot | Docker health check |
 | Uninstall | Rename to `<app>.<date>.archive` (optionally `.zip`) — data never deleted |
+| Install from backup | Restore an archive as `AppData/<app>/`, then install over it (keeps its `.env` + data) |
 | Hidden entries | Any name containing `.` |
 </content>
 </invoke>

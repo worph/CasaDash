@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
-  import { storeOpen } from '../../stores/ui'
+  import { storeApp } from '../../stores/ui'
+  import { backToCatalog, closeStore, openStoreApp } from '../../route'
   import { fetchStore, type StoreApp, type StoreData } from '../../stores/store'
   import { apps } from '../../stores/apps'
   import { sanitizeProject } from '../../project'
@@ -16,7 +17,9 @@
   let developer = $state('All')
   let store = $state('All')
   let search = $state('')
-  let selected = $state<string | null>(null)
+  // Which app's detail page is showing lives in the URL (/store/<app>), not here:
+  // the route owns it so deep links, Back and the in-panel back arrow all agree.
+  const selected = $derived($storeApp)
 
   onMount(load)
   function load() {
@@ -89,24 +92,28 @@
   })
 </script>
 
-<div class="backdrop" onclick={() => storeOpen.set(false)} role="presentation">
+<div class="backdrop" onclick={closeStore} role="presentation">
   <div class="panel" onclick={(e) => e.stopPropagation()} role="presentation">
     <header class="head">
       <h3 class="title">{$t('app_store')}</h3>
-      <button class="close" aria-label="Close" onclick={() => storeOpen.set(false)}>✕</button>
+      <button class="close" aria-label="Close" onclick={closeStore}>✕</button>
     </header>
 
     <div class="body">
-      {#if loading}
+      <!-- The detail page renders straight away, without waiting for the catalog:
+           a deep link can pin an app to a store the user has not added, so the app
+           may not be in `data` at all and installed-ness comes from the tiles. -->
+      {#if selected}
+        <AppDetail
+          id={selected.app}
+          store={selected.store}
+          installed={installedIds.has(sanitizeProject(selected.app))}
+          onback={backToCatalog}
+        />
+      {:else if loading}
         <p class="muted">{$t('loading')}</p>
       {:else if error}
         <p class="error">{error}</p>
-      {:else if selected}
-        <AppDetail
-          id={selected}
-          installed={data ? isInstalled(data.apps.find((a) => a.id === selected)!) : false}
-          onback={() => (selected = null)}
-        />
       {:else if data}
         {#if browsing && featured.length}
           <section>
@@ -151,7 +158,7 @@
 </div>
 
 {#snippet hero(app: StoreApp)}
-  <div class="hero" onclick={() => (selected = app.id)} role="presentation">
+  <div class="hero" onclick={() => openStoreApp(app.id, app.store)} role="presentation">
     <div class="thumb" style:background-image={app.thumbnail ? `url(${app.thumbnail})` : undefined}></div>
     <div class="hero-body">
       <img class="plate" src={app.icon} alt="" loading="lazy" />
@@ -159,13 +166,13 @@
         <span class="name one-line">{app.name}</span>
         <span class="tag one-line">{app.tagline}</span>
       </div>
-      <InstallButton id={app.id} installed={isInstalled(app)} />
+      <InstallButton id={app.id} store={app.store} installed={isInstalled(app)} />
     </div>
   </div>
 {/snippet}
 
 {#snippet card(app: StoreApp)}
-  <div class="app-item" onclick={() => (selected = app.id)} role="presentation">
+  <div class="app-item" onclick={() => openStoreApp(app.id, app.store)} role="presentation">
     <div class="row1">
       <img class="plate" src={app.icon} alt="" loading="lazy" />
       <div class="meta">
@@ -179,7 +186,7 @@
     <!-- Install pill sits on its own row below the app; while installing it
          shows a compact progress pill (the two-bar detail lives on the tile). -->
     <div class="installbar">
-      <InstallButton id={app.id} installed={isInstalled(app)} />
+      <InstallButton id={app.id} store={app.store} installed={isInstalled(app)} />
     </div>
   </div>
 {/snippet}

@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/yundera/casadash/internal/apps"
 	"github.com/yundera/casadash/internal/appstore"
 )
 
@@ -112,12 +113,16 @@ func (s *Server) applySources(w http.ResponseWriter, ctx context.Context, urls [
 	writeJSON(w, http.StatusOK, map[string][]string{"sources": s.store.URLs()})
 }
 
+// handleStoreApp returns one store app. The optional ?store=<zip url> pins the
+// lookup to that store — which need not be a configured source, so a deep link
+// can address an app in a store the user has never added (the UI warns before
+// installing one). Without it, the merged catalog answers: first store wins.
 func (s *Server) handleStoreApp(w http.ResponseWriter, r *http.Request) {
 	if s.store == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "store unavailable"})
 		return
 	}
-	app, _, err := s.store.Get(chi.URLParam(r, "id"))
+	app, _, err := s.store.GetFrom(r.Context(), storeParam(r), chi.URLParam(r, "id"))
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 		return
@@ -125,16 +130,52 @@ func (s *Server) handleStoreApp(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, app)
 }
 
+// storeParam reads the optional ?store=<zip url> pin shared by the store app,
+// backups and install endpoints. Empty means "use the merged catalog".
+func storeParam(r *http.Request) string {
+	return strings.TrimSpace(r.URL.Query().Get("store"))
+}
+
+// handleStoreBackups lists the uninstall archives of a store app, so the store
+// can offer "install from backup" next to a fresh install. The compose project
+// name is resolved server-side (it can come from the compose file's own `name:`,
+// which the client cannot see).
+func (s *Server) handleStoreBackups(w http.ResponseWriter, r *http.Request) {
+	if s.installer == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "install unavailable"})
+		return
+	}
+	project, err := s.installer.ProjectFor(r.Context(), storeParam(r), chi.URLParam(r, "id"))
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+	backups := apps.ListBackups(s.cfg.AppsDir(), project)
+	if backups == nil {
+		backups = []apps.Backup{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"project": project, "backups": backups})
+}
+
 // handleInstall starts a detached install and returns immediately. Progress is
 // not streamed on this request: the install runs on a background context (so
 // closing the store panel never cancels it) and its progress rides the live
 // "apps" channel as Download/Start bars on the app's tile (see appsSnapshot).
+//
+// An optional {"from_backup": "<archive name>"} body reinstalls the app on top of
+// one of its uninstall archives instead of on a clean slate.
 func (s *Server) handleInstall(w http.ResponseWriter, r *http.Request) {
 	if s.installer == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "install unavailable"})
 		return
 	}
-	project, err := s.installer.StartInstall(chi.URLParam(r, "id"))
+	var body struct {
+		FromBackup string `json:"from_backup"`
+	}
+	// A body is optional here: a plain install posts nothing at all.
+	_ = json.NewDecoder(r.Body).Decode(&body)
+
+	project, err := s.installer.StartInstall(r.Context(), storeParam(r), chi.URLParam(r, "id"), strings.TrimSpace(body.FromBackup))
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return

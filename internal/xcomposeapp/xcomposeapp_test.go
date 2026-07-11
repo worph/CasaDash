@@ -44,3 +44,48 @@ func TestParseVersionGate(t *testing.T) {
 		t.Fatalf("nil: got %v, want ErrNoExtension", err)
 	}
 }
+
+func TestParseFolders(t *testing.T) {
+	a, err := Parse(map[string]any{
+		"folders": []any{
+			"/DATA/AppData/${AppID}/config", // bare-path shorthand
+			map[string]any{
+				"path":      "/DATA/Media",
+				"user":      1000, // YAML types this as an int; must survive as text
+				"group":     "media",
+				"mode":      "0775",
+				"recursive": true,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(a.Folders) != 2 {
+		t.Fatalf("got %d folders, want 2", len(a.Folders))
+	}
+	if got := a.Folders[0]; got.Path != "/DATA/AppData/${AppID}/config" || got.Recursive || got.Mode != "" {
+		t.Fatalf("shorthand folder = %+v", got)
+	}
+	want := Folder{Path: "/DATA/Media", User: "1000", Group: "media", Mode: "0775", Recursive: true}
+	if a.Folders[1] != want {
+		t.Fatalf("folder = %+v, want %+v", a.Folders[1], want)
+	}
+}
+
+func TestParseHooks(t *testing.T) {
+	a, err := Parse(map[string]any{
+		"hooks": map[string]any{
+			"pre_install": "echo installing",
+			"pre_up":      "echo starting",
+			"post_up":     "echo started",
+		},
+	})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	want := Hooks{PreInstall: "echo installing", PreUp: "echo starting", PostUp: "echo started"}
+	if a.Hooks != want {
+		t.Fatalf("hooks = %+v, want %+v", a.Hooks, want)
+	}
+}

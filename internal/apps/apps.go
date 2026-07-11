@@ -17,11 +17,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/yundera/casadash/internal/composecmd"
 	"github.com/yundera/casadash/internal/composefile"
 	"github.com/yundera/casadash/internal/config"
 	"github.com/yundera/casadash/internal/dockerx"
-	"github.com/yundera/casadash/internal/envinject"
+	"github.com/yundera/casadash/internal/stackup"
 	"github.com/yundera/casadash/internal/xcasaos"
 	"github.com/yundera/casadash/internal/xcomposeapp"
 )
@@ -493,16 +492,18 @@ func (r *Registry) composeFiles(dir string) []string {
 	return files
 }
 
-// EnsureStarted brings an app up. For a CasaDash-managed project it runs
-// `docker compose up -d` (idempotent — starts a stopped stack or recreates a
-// removed one) from base + override; for a discovered/unmanaged stack it starts
-// its existing containers. The tile shows a "…" busy overlay while it runs.
+// EnsureStarted brings an app up. For a CasaDash-managed project it goes through
+// stackup (ensure folders → pre_up hook → `docker compose up -d` from base +
+// override → post_up hook), which is idempotent: it starts a stopped stack or
+// recreates a removed one. For a discovered/unmanaged stack — one CasaDash has no
+// compose files for — it just starts the existing containers. The tile shows a "…"
+// busy overlay while it runs.
 func (r *Registry) EnsureStarted(ctx context.Context, id string) error {
 	r.enter(id)
 	defer r.leave(id)
 	if r.isManaged(id) {
 		dir := filepath.Join(r.cfg.AppsDir(), id)
-		return composecmd.Up(ctx, dir, id, r.composeFiles(dir), envinject.Env(r.cfg, id))
+		return stackup.Up(ctx, r.cfg, id, dir, r.composeFiles(dir))
 	}
 	return r.dx.StartProject(ctx, id)
 }

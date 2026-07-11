@@ -120,12 +120,36 @@ func (m *Manager) Get(id string) (*CatalogApp, []byte, error) {
 	return app, raw, nil
 }
 
+// GetFrom returns app id as it stands in store storeURL, along with its raw
+// compose bytes. The app need not be in the merged catalog at all — storeURL may
+// be a store the user has never added — which is what lets a deep link
+// (/store/<id>?store=<url>) address an app in an unlisted store. When storeURL is
+// empty the merged catalog answers (Get).
+//
+// An already-extracted copy of the store answers as-is — including "no such app",
+// so a bad id fails fast; only a store that has never been fetched is downloaded
+// here. Browsing must not pay for a sync: stores run to tens of MB and a
+// re-download would stall the detail page for minutes. Configured stores are kept
+// fresh by the hourly Refresh; an unlisted store is fetched once, on the first
+// deep link that names it, and thereafter refreshed only on demand (RefreshStore)
+// or when the update flow syncs it (AppComposeFrom).
+func (m *Manager) GetFrom(ctx context.Context, storeURL, id string) (*CatalogApp, []byte, error) {
+	if strings.TrimSpace(storeURL) == "" {
+		return m.Get(id)
+	}
+	root, err := findAppsRoot(m.workdir(storeURL))
+	if err != nil {
+		if root, err = m.syncStore(ctx, storeURL); err != nil {
+			return nil, nil, err
+		}
+	}
+	return appIn(root, storeURL, id)
+}
+
 // AppComposeFrom returns the raw docker-compose.yml bytes for app id as it
-// currently stands in store storeURL. It syncs that specific store (using the
-// same cache/ETag path as Refresh) so the update flow can diff the store's live
-// version against what's installed — even if storeURL is no longer in the
-// configured source list. When storeURL is empty it falls back to the merged
-// catalog (Get).
+// currently stands in store storeURL. Unlike GetFrom it always syncs the store
+// first: the update flow diffs the store's live version against what's installed,
+// so a stale extracted copy would report "up to date" when it isn't.
 func (m *Manager) AppComposeFrom(ctx context.Context, storeURL, id string) ([]byte, error) {
 	if strings.TrimSpace(storeURL) == "" {
 		_, raw, err := m.Get(id)
@@ -135,13 +159,23 @@ func (m *Manager) AppComposeFrom(ctx context.Context, storeURL, id string) ([]by
 	if err != nil {
 		return nil, err
 	}
+	_, raw, err := appIn(root, storeURL, id)
+	return raw, err
+}
+
+// appIn finds app id in an extracted store root and reads its compose file.
+func appIn(root, storeURL, id string) (*CatalogApp, []byte, error) {
 	apps, _, _ := parseStore(root, storeURL)
 	for _, a := range apps {
 		if a.ID == id {
-			return os.ReadFile(a.composePath)
+			raw, err := os.ReadFile(a.composePath)
+			if err != nil {
+				return nil, nil, err
+			}
+			return a, raw, nil
 		}
 	}
-	return nil, fmt.Errorf("app %q not found in store %s", id, storeURL)
+	return nil, nil, fmt.Errorf("app %q not found in store %s", id, storeURL)
 }
 
 // Refresh downloads and reparses every configured store.

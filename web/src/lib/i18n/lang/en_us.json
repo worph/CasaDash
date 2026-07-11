@@ -8,6 +8,7 @@
   "used": "Used",
   "total": "Total",
   "settings": "Settings",
+  "tips": "Tips",
   "language": "Language",
   "wallpaper": "Wallpaper",
   "widgets": "Widgets",
@@ -38,5 +39,12 @@
   "back": "Back",
   "cancel": "Cancel",
   "add": "Add",
-  "loading": "Loading…"
+  "loading": "Loading…",
+  "unlisted_store": "This app comes from a store you have not added:",
+  "unlisted_store_hint": "Only install it if you trust that source.",
+  "fresh_install": "Fresh install",
+  "restore_from_backup": "Restore from backup",
+  "restore_from_backup_hint": "Reinstalls the app on top of that backup's data and .env.",
+  "backup_zip": "zip",
+  "backup_folder": "folder"
 }

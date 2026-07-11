@@ -138,19 +138,23 @@ export interface AppConfig {
   base: string
   override: string
   webui: WebUI
-  /** Store-provided guidance (x-casaos tips), read-only. */
+  /** App guidance — seeded from the store, editable; saved into the override. */
   tips: string
-  /** The user's own editable note, persisted per-app. */
-  note: string
 }
 
 export function getConfig(id: string): Promise<AppConfig> {
   return api.get<AppConfig>(`/api/apps/${encodeURIComponent(id)}/config`)
 }
 
-/** Save (or clear, when blank) the user's per-app note. */
-export async function setNote(id: string, note: string): Promise<void> {
-  await api.put(`/api/apps/${encodeURIComponent(id)}/note`, { note })
+/** Save (or clear, when blank) the app's tips into its override. */
+export async function setTips(id: string, tips: string): Promise<void> {
+  await api.put(`/api/apps/${encodeURIComponent(id)}/tips`, { tips })
+}
+
+/** Fetch the app's tips with ${VAR} references resolved (env-replaced preview). */
+export async function renderTips(id: string): Promise<string> {
+  const r = await api.get<{ tips: string }>(`/api/apps/${encodeURIComponent(id)}/tips`)
+  return r.tips
 }
 
 export async function setConfig(id: string, override: string): Promise<void> {
@@ -162,6 +166,106 @@ export async function setConfig(id: string, override: string): Promise<void> {
 export async function setWebUI(id: string, w: Omit<WebUI, 'url'>): Promise<void> {
   await api.put(`/api/apps/${encodeURIComponent(id)}/webui`, w)
   await loadApps()
+}
+
+/** The app's .env, in file order — prefilled at install (PUID, DATA_ROOT, REF_*,
+ *  …) and hand-editable since. It is what ${VAR} in the app's compose resolves
+ *  against; it is NOT the same as a service's `environment:` block (that lives in
+ *  the override form). Shares the EnvVar shape declared below. */
+export function getEnv(id: string): Promise<EnvVar[]> {
+  return api.get<EnvVar[]>(`/api/apps/${encodeURIComponent(id)}/env`)
+}
+
+/** Rewrite the app's .env to exactly these vars and recreate the stack — compose
+ *  reads .env only when it brings the project up. */
+export async function setEnv(id: string, vars: EnvVar[]): Promise<void> {
+  await api.put(`/api/apps/${encodeURIComponent(id)}/env`, { vars })
+  await loadApps()
+}
+
+/** A single-valued override field. `value` is what runs, `base` what the store
+ *  ships; clearing `value` resets the field to the store's. `complex` marks a
+ *  construct only the YAML view can edit safely (a list-form command, a hand-
+ *  written tag) — the form shows it read-only. */
+export interface Scalar {
+  value: string
+  base: string
+  overridden: boolean
+  complex: boolean
+  /** The field's YAML, when `complex` — so the form can show what it won't edit. */
+  raw?: string
+}
+
+/** A sequence field (ports, volumes, …). `value` is the effective list after
+ *  Compose's merge; entries also present in `base` came from the store. */
+export interface ListField {
+  value: string[]
+  base: string[]
+  overridden: boolean
+  complex: boolean
+  raw?: string
+}
+
+export interface EnvVar {
+  key: string
+  value: string
+}
+
+export interface EnvField {
+  value: EnvVar[]
+  base: EnvVar[]
+  overridden: boolean
+  complex: boolean
+  raw?: string
+}
+
+/** One compose service as the settings form edits it. */
+export interface FormService {
+  name: string
+  image: Scalar
+  restart: Scalar
+  ports: ListField
+  volumes: ListField
+  environment: EnvField
+  privileged: Scalar
+  command: Scalar
+  mem_limit: Scalar
+  cpus: Scalar
+  devices: ListField
+  cap_add: ListField
+}
+
+export interface OverrideForm {
+  services: FormService[]
+}
+
+/** The friendly view of the app's override — one entry per compose service. */
+export function getOverrideForm(id: string): Promise<OverrideForm> {
+  return api.get<OverrideForm>(`/api/apps/${encodeURIComponent(id)}/override/form`)
+}
+
+/** Patch the override with the form's values and recreate the app. */
+export async function setOverrideForm(id: string, form: OverrideForm): Promise<void> {
+  await api.put(`/api/apps/${encodeURIComponent(id)}/override/form`, form)
+  await loadApps()
+}
+
+/** Check a candidate override against the app's base compose without applying it.
+ *  A rejected override is a normal response carrying Compose's own message. */
+export function validateOverride(id: string, override: string): Promise<{ ok: boolean; error?: string }> {
+  return api.post<{ ok: boolean; error?: string }>(
+    `/api/apps/${encodeURIComponent(id)}/override/validate`,
+    { override },
+  )
+}
+
+/** The project as Compose resolves it: base + override, merged and interpolated. */
+export async function effectiveConfig(id: string): Promise<string> {
+  const r = await api.get<{ config?: string; error?: string }>(
+    `/api/apps/${encodeURIComponent(id)}/effective`,
+  )
+  if (r.error) throw new Error(r.error)
+  return r.config ?? ''
 }
 
 /** Whether an app's reference store carries a newer docker-compose.yml than the

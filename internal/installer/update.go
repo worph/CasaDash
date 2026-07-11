@@ -9,9 +9,9 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/yundera/casadash/internal/composecmd"
 	"github.com/yundera/casadash/internal/composefile"
 	"github.com/yundera/casadash/internal/envinject"
+	"github.com/yundera/casadash/internal/stackup"
 )
 
 // UpdateStatus reports whether a managed app has a pending store update. It is
@@ -87,19 +87,15 @@ func (in *Installer) ApplyUpdate(ctx context.Context, project string) (bool, err
 	if err := os.WriteFile(composePath, newBase, 0o644); err != nil {
 		return false, err
 	}
-	// Pre-create any bind dirs the updated compose newly introduces (harmless when
-	// they already exist), so the app can write to them just like on install.
-	for _, d := range envinject.VolumeDirs(newBase, in.cfg) {
-		if err := os.MkdirAll(d, 0o755); err == nil {
-			chownPUID(d, in.cfg)
-		}
-	}
 
+	// stackup.Up creates any folder the updated compose newly introduces — declared
+	// or bind-derived — before bringing the stack back up, so the new version can
+	// write to it exactly as it would on a fresh install.
 	files := []string{composePath}
 	if override := filepath.Join(dir, "docker-compose.override.yml"); fileExists(override) {
 		files = append(files, override)
 	}
-	if err := composecmd.Up(ctx, dir, project, files, envinject.Env(in.cfg, project)); err != nil {
+	if err := stackup.Up(ctx, in.cfg, project, dir, files); err != nil {
 		return false, err
 	}
 	return true, nil

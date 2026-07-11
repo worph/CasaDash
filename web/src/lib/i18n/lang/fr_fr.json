@@ -8,6 +8,7 @@
   "used": "Utilisé",
   "total": "Total",
   "settings": "Paramètres",
+  "tips": "Astuces",
   "language": "Langue",
   "wallpaper": "Fond d'écran",
   "widgets": "Widgets",
@@ -38,5 +39,12 @@
   "back": "Retour",
   "cancel": "Annuler",
   "add": "Ajouter",
-  "loading": "Chargement…"
+  "loading": "Chargement…",
+  "unlisted_store": "Cette application provient d'un magasin que vous n'avez pas ajouté :",
+  "unlisted_store_hint": "Ne l'installez que si vous faites confiance à cette source.",
+  "fresh_install": "Nouvelle installation",
+  "restore_from_backup": "Restaurer depuis une sauvegarde",
+  "restore_from_backup_hint": "Réinstalle l'application sur les données et le .env de cette sauvegarde.",
+  "backup_zip": "zip",
+  "backup_folder": "dossier"
 }

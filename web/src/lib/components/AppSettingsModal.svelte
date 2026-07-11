@@ -3,16 +3,22 @@
     getConfig,
     setConfig,
     setWebUI,
-    setNote,
+    setTips,
     getServices,
     checkUpdate,
     applyUpdate,
+    getEnv,
+    setEnv,
+    validateOverride,
+    effectiveConfig,
     type WebUI,
     type AppService,
     type UpdateStatus,
+    type EnvVar,
   } from '../stores/apps'
   import { openStream } from '../live/stream'
   import { renderSize } from '../format'
+  import OverrideForm from './OverrideForm.svelte'
 
   let {
     id,
@@ -21,17 +27,18 @@
     onclose,
   }: { id: string; name: string; managed: boolean; onclose: () => void } = $props()
 
-  // Managed apps get the config-editing pages (incl. Tips + note, which live in
-  // the app folder); every app gets logs + stats.
-  type Tab = 'tips' | 'webui' | 'compose' | 'override' | 'update' | 'logs' | 'stats'
+  // Managed apps get the config-editing pages (incl. editable Tips, saved into
+  // the override); every app gets logs + stats.
+  type Tab = 'tips' | 'webui' | 'env' | 'compose' | 'override' | 'update' | 'logs' | 'stats'
   const tabs = $derived<Tab[]>(
     managed
-      ? ['tips', 'webui', 'compose', 'override', 'update', 'logs', 'stats']
+      ? ['tips', 'webui', 'env', 'compose', 'override', 'update', 'logs', 'stats']
       : ['logs', 'stats'],
   )
   const tabLabel: Record<Tab, string> = {
     tips: 'Tips',
     webui: 'Web UI',
+    env: 'Env',
     compose: 'Compose',
     override: 'Override',
     update: 'Update',
@@ -40,12 +47,53 @@
   }
   let tab = $state<Tab>(managed ? 'tips' : 'logs')
 
-  // --- Config (base compose / override / web-UI / tips / note) ---
+  // The Override tab is one thing seen three ways: the friendly form, the file it
+  // writes, and what Compose makes of base + override together. The form is the
+  // default — the YAML is there when the form can't express something.
+  type View = 'form' | 'yaml' | 'effective'
+  const views: View[] = ['form', 'yaml', 'effective']
+  const viewLabel: Record<View, string> = { form: 'Form', yaml: 'YAML', effective: 'Effective' }
+  let view = $state<View>('form')
+
+  // Effective config — `docker compose config` over base + override, loaded when
+  // the view is first opened and after every save that could change it.
+  let effective = $state('')
+  let effectiveMsg = $state('')
+  $effect(() => {
+    if (tab !== 'override' || view !== 'effective' || effective) return
+    effectiveConfig(id)
+      .then((c) => (effective = c))
+      .catch((e) => (effectiveMsg = String(e)))
+  })
+
+  // The three views read the same two files, so a save through any of them has to
+  // refresh the other two: the YAML the form just wrote, and the merge it changed.
+  async function afterOverrideSave() {
+    effective = ''
+    await loadConfig()
+  }
+
+  // Validate — Compose's own verdict on the override in the editor, without
+  // applying it. The save path runs the same check server-side.
+  let validating = $state(false)
+  async function validate() {
+    validating = true
+    overrideMsg = ''
+    try {
+      const r = await validateOverride(id, override)
+      overrideMsg = r.ok ? 'Valid.' : (r.error ?? 'Invalid.')
+    } catch (e) {
+      overrideMsg = String(e)
+    } finally {
+      validating = false
+    }
+  }
+
+  // --- Config (base compose / override / web-UI / tips) ---
   let baseCompose = $state('')
   let override = $state('')
   let webui = $state<WebUI>({ scheme: '', host: '', port: '', path: '', url: '' })
   let tips = $state('')
-  let note = $state('')
   let configLoaded = $state(false)
 
   async function loadConfig() {
@@ -54,26 +102,25 @@
     override = c.override
     webui = c.webui
     tips = c.tips
-    note = c.note
     configLoaded = true
   }
   $effect(() => {
     if (managed && !configLoaded) loadConfig()
   })
 
-  // Note editor (the user's own scratchpad, persisted per-app).
-  let savingNote = $state(false)
-  let noteMsg = $state('')
-  async function saveNote() {
-    savingNote = true
-    noteMsg = ''
+  // Tips editor — the app's guidance, editable; saved into the override.
+  let savingTips = $state(false)
+  let tipsMsg = $state('')
+  async function saveTips() {
+    savingTips = true
+    tipsMsg = ''
     try {
-      await setNote(id, note)
-      noteMsg = 'Saved.'
+      await setTips(id, tips)
+      tipsMsg = 'Saved.'
     } catch (e) {
-      noteMsg = String(e)
+      tipsMsg = String(e)
     } finally {
-      savingNote = false
+      savingTips = false
     }
   }
   // Override editor
@@ -85,10 +132,63 @@
     try {
       await setConfig(id, override)
       overrideMsg = 'Saved & recreated.'
+      effective = '' // the merge changed; the Effective view must re-read it
     } catch (e) {
       overrideMsg = String(e)
     } finally {
       savingOverride = false
+    }
+  }
+
+  // --- .env editor (the app's ${VAR} interpolation vars, one KEY=VALUE per row) ---
+  let envVars = $state<EnvVar[]>([])
+  let envLoaded = $state(false)
+  let savingEnv = $state(false)
+  let envMsg = $state('')
+
+  $effect(() => {
+    if (tab !== 'env' || envLoaded) return
+    getEnv(id)
+      .then((v) => {
+        envVars = v
+        envLoaded = true
+      })
+      .catch((e) => (envMsg = String(e)))
+  })
+
+  // Same rules the server enforces before writing, surfaced while typing so a bad
+  // row is caught here instead of coming back as a 400.
+  const KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
+  const envError = $derived(
+    (() => {
+      const seen = new Set<string>()
+      for (const v of envVars) {
+        if (!KEY_RE.test(v.key)) {
+          return `Invalid name "${v.key}" — letters, digits and _ only, not starting with a digit.`
+        }
+        if (seen.has(v.key)) return `Duplicate variable "${v.key}".`
+        seen.add(v.key)
+      }
+      return ''
+    })(),
+  )
+
+  function addEnvVar() {
+    envVars = [...envVars, { key: '', value: '' }]
+  }
+  function removeEnvVar(i: number) {
+    envVars = envVars.filter((_, n) => n !== i)
+  }
+  async function saveEnv() {
+    savingEnv = true
+    envMsg = ''
+    try {
+      await setEnv(id, envVars)
+      envMsg = 'Saved & recreated.'
+    } catch (e) {
+      envMsg = String(e)
+    } finally {
+      savingEnv = false
     }
   }
 
@@ -248,25 +348,21 @@
         {#if !configLoaded}
           <p class="hint">Loading…</p>
         {:else}
-          {#if tips.trim()}
-            <p class="hint">Setup guidance shipped with this app by the store.</p>
-            <pre class="tips">{tips}</pre>
-          {:else}
-            <p class="hint">The store didn't ship any setup tips for this app.</p>
-          {/if}
-          <p class="hint note-hint">
-            Your <strong>note</strong> — a private scratchpad for this app (credentials reminders,
-            reverse-proxy details, whatever you need). Saved alongside the app; never shown to anyone else.
+          <p class="hint">
+            <strong>Tips</strong> for this app — setup guidance, credentials reminders, reverse-proxy
+            details, whatever you need. Seeded from the store and freely editable; saving writes them
+            into the <code>docker-compose.override.yml</code>. <code>{'${VAR}'}</code> references are
+            shown as-is here; use the tile's <em>Tips</em> menu to see them with values filled in.
           </p>
           <textarea
-            bind:value={note}
+            bind:value={tips}
             spellcheck="false"
-            placeholder="Write a note for this app…"
+            placeholder="Write tips for this app…"
           ></textarea>
           <div class="actions">
-            <span class="msg">{noteMsg}</span>
-            <button class="primary" disabled={savingNote} onclick={saveNote}>
-              {savingNote ? 'Saving…' : 'Save note'}
+            <span class="msg">{tipsMsg}</span>
+            <button class="primary" disabled={savingTips} onclick={saveTips}>
+              {savingTips ? 'Saving…' : 'Save tips'}
             </button>
           </div>
         {/if}
@@ -318,6 +414,55 @@
             {savingWebui ? 'Saving…' : 'Save & recreate'}
           </button>
         </div>
+      {:else if tab === 'env'}
+        <p class="hint">
+          The app's <code>.env</code> — the variables its <code>docker-compose.yml</code> resolves
+          <code>{'${VAR}'}</code> against. Prefilled at install (<code>PUID</code>,
+          <code>DATA_ROOT</code>, <code>REF_*</code>, …) and yours to edit. This is not a service's
+          <code>environment:</code> block — for that, edit the override. Saving recreates the stack,
+          because Compose only reads <code>.env</code> when it brings the app up.
+        </p>
+        {#if !envLoaded && !envMsg}
+          <p class="hint">Loading…</p>
+        {:else}
+          <div class="env-list">
+            {#each envVars as v, i (i)}
+              <div class="env-row">
+                <input
+                  bind:value={v.key}
+                  spellcheck="false"
+                  placeholder="KEY"
+                  aria-label="Variable name"
+                  class:bad={v.key !== '' && !KEY_RE.test(v.key)}
+                />
+                <input
+                  bind:value={v.value}
+                  spellcheck="false"
+                  placeholder="value"
+                  aria-label="Value for {v.key || 'new variable'}"
+                />
+                <button
+                  class="remove"
+                  aria-label="Remove {v.key || 'variable'}"
+                  onclick={() => removeEnvVar(i)}>✕</button
+                >
+              </div>
+            {:else}
+              <p class="hint">No variables — this app's <code>.env</code> is empty.</p>
+            {/each}
+          </div>
+          <div class="actions">
+            <span class="msg">{envError || envMsg}</span>
+            <button onclick={addEnvVar}>Add variable</button>
+            <button
+              class="primary"
+              disabled={savingEnv || !!envError}
+              onclick={saveEnv}
+            >
+              {savingEnv ? 'Saving…' : 'Save & recreate'}
+            </button>
+          </div>
+        {/if}
       {:else if tab === 'compose'}
         <p class="hint">
           The strict <code>docker-compose.yml</code> as shipped by the store — <strong>read-only</strong>.
@@ -325,21 +470,44 @@
         </p>
         <pre class="code readonly">{baseCompose || (configLoaded ? '(empty)' : 'Loading…')}</pre>
       {:else if tab === 'override'}
-        <p class="hint">
-          Your edits, layered on top via Compose override semantics. The running stack is
-          <code>docker-compose.yml</code> + this override.
-        </p>
-        <textarea
-          bind:value={override}
-          spellcheck="false"
-          placeholder={'services:\n  app:\n    ports:\n      - "8080:80"'}
-        ></textarea>
-        <div class="actions">
-          <span class="msg">{overrideMsg}</span>
-          <button class="primary" disabled={savingOverride} onclick={saveOverride}>
-            {savingOverride ? 'Saving…' : 'Save & recreate'}
-          </button>
+        <div class="views">
+          {#each views as v (v)}
+            <button class:active={view === v} onclick={() => (view = v)}>{viewLabel[v]}</button>
+          {/each}
         </div>
+
+        {#if view === 'form'}
+          <OverrideForm {id} onsaved={afterOverrideSave} />
+        {:else if view === 'yaml'}
+          <p class="hint">
+            Your edits, layered on top via Compose override semantics. The running stack is
+            <code>docker-compose.yml</code> + this override. The <strong>Form</strong> view writes
+            this same file — anything it can't express (long-syntax ports, a list-form command)
+            belongs here.
+          </p>
+          <textarea
+            bind:value={override}
+            spellcheck="false"
+            placeholder={'services:\n  app:\n    ports:\n      - "8080:80"'}
+          ></textarea>
+          <div class="actions">
+            <span class="msg">{overrideMsg}</span>
+            <button disabled={validating || savingOverride} onclick={validate}>
+              {validating ? 'Checking…' : 'Validate'}
+            </button>
+            <button class="primary" disabled={savingOverride} onclick={saveOverride}>
+              {savingOverride ? 'Saving…' : 'Save & recreate'}
+            </button>
+          </div>
+        {:else}
+          <p class="hint">
+            What Compose actually runs: <code>docker-compose.yml</code> and your override merged,
+            with every <code>{'${VAR}'}</code> resolved from the <code>.env</code> —
+            <strong>read-only</strong>. This is the file to read when an override doesn't do what
+            you expected.
+          </p>
+          <pre class="code readonly">{effective || effectiveMsg || 'Loading…'}</pre>
+        {/if}
       {:else if tab === 'update'}
         <p class="hint">
           Pulls a fresher <code>docker-compose.yml</code> from the store this app was installed
@@ -517,6 +685,29 @@
     display: flex;
     flex-direction: column;
   }
+  /* Form / YAML / Effective — three views of the same override, right-aligned so
+     the switch reads as a mode toggle rather than another row of tabs. */
+  .views {
+    display: flex;
+    align-self: flex-end;
+    gap: 0.15rem;
+    padding: 0.15rem;
+    margin-bottom: 0.6rem;
+    background: rgba(0, 0, 0, 0.3);
+    border-radius: 8px;
+  }
+  .views button {
+    background: none;
+    border: none;
+    color: var(--grey-400);
+    border-radius: 6px;
+    padding: 0.3rem 0.8rem;
+    font-size: 0.78rem;
+  }
+  .views button.active {
+    background: rgba(255, 255, 255, 0.12);
+    color: var(--grey-100);
+  }
   .hint {
     color: var(--grey-400);
     font-size: 0.8rem;
@@ -559,6 +750,46 @@
     font-family: ui-monospace, monospace;
     font-size: 0.8rem;
   }
+  /* .env editor */
+  .env-list {
+    flex: 1;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    padding-right: 0.25rem;
+  }
+  .env-row {
+    display: grid;
+    grid-template-columns: 14rem 1fr 2rem;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .env-row input {
+    background: rgba(0, 0, 0, 0.35);
+    color: var(--grey-100);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 8px;
+    padding: 0.45rem 0.6rem;
+    font-family: ui-monospace, monospace;
+    font-size: 0.8rem;
+    min-width: 0;
+  }
+  .env-row input.bad {
+    border-color: var(--red);
+  }
+  .env-row .remove {
+    background: none;
+    border: none;
+    color: var(--grey-400);
+    font-size: 0.85rem;
+    padding: 0.25rem;
+    border-radius: 6px;
+  }
+  .env-row .remove:hover {
+    color: var(--red);
+    background: rgba(255, 255, 255, 0.08);
+  }
   textarea {
     flex: 1;
     min-height: 8rem;
@@ -583,25 +814,6 @@
   }
   .code.readonly {
     border: 1px solid rgba(255, 255, 255, 0.08);
-  }
-  /* Tips (store guidance, read-only) */
-  .tips {
-    max-height: 40%;
-    overflow: auto;
-    background: rgba(0, 0, 0, 0.25);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 8px;
-    padding: 0.6rem 0.75rem;
-    margin: 0 0 0.75rem;
-    font-family: inherit;
-    font-size: 0.82rem;
-    line-height: 1.45;
-    color: var(--grey-200);
-    white-space: pre-wrap;
-    word-break: break-word;
-  }
-  .note-hint {
-    margin-top: 0.25rem;
   }
   .actions {
     display: flex;

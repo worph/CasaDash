@@ -8,14 +8,12 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/yundera/casadash/internal/composecmd"
 	"github.com/yundera/casadash/internal/composefile"
 	"github.com/yundera/casadash/internal/envinject"
+	"github.com/yundera/casadash/internal/stackup"
 	"github.com/yundera/casadash/internal/xcasaos"
+	"github.com/yundera/casadash/internal/xcomposeapp"
 )
-
-// noteFile is the app-local file CasaDash persists the user's editable note in.
-const noteFile = "note.md"
 
 // Config carries a managed app's base compose, its user override, and the
 // effective web-UI (opening URL) configuration derived from both.
@@ -23,12 +21,11 @@ type Config struct {
 	Base     string `json:"base"`
 	Override string `json:"override"`
 	WebUI    WebUI  `json:"webui"`
-	// Tips is the store-provided guidance (x-casaos tips: before_install +
-	// custom), read-only — it ships with the app definition.
+	// Tips is the app's guidance, seeded from the store (x-compose-app tips, else
+	// x-casaos tips: before_install + custom) but editable: edits are persisted
+	// into the override's x-compose-app.tips key (see SetTips). It doubles as the
+	// operator's per-app note.
 	Tips string `json:"tips"`
-	// Note is the user's own editable note, persisted in the app folder. It
-	// doubles as CasaOS's per-app "tips" scratchpad.
-	Note string `json:"note"`
 }
 
 // WebUI is the effective x-compose-app webui-* configuration (base + override
@@ -64,12 +61,23 @@ func (r *Registry) GetConfig(id string) (*Config, error) {
 				URL:    ca.WebURL(r.cfg.RefDomain),
 			}
 		}
-		if si != nil {
-			cfg.Tips = storeTips(si)
+		cfg.Tips = mergedTips(si, ca)
+	}
+	return cfg, nil
+}
+
+// mergedTips picks the app's guidance: x-compose-app's tips when it declares
+// them (that is where operator edits land), else the store's x-casaos tips.
+func mergedTips(si *xcasaos.StoreInfo, ca *xcomposeapp.App) string {
+	if ca != nil {
+		if t := strings.TrimSpace(ca.Tips.Value()); t != "" {
+			return t
 		}
 	}
-	cfg.Note, _ = readNote(dir)
-	return cfg, nil
+	if si != nil {
+		return storeTips(si)
+	}
+	return ""
 }
 
 // storeTips flattens the x-casaos tips (localized before_install guidance plus
@@ -85,42 +93,87 @@ func storeTips(si *xcasaos.StoreInfo) string {
 	return strings.Join(parts, "\n\n")
 }
 
-// readNote returns the user's per-app note (empty if none has been written).
-func readNote(dir string) (string, error) {
-	b, err := os.ReadFile(filepath.Join(dir, noteFile))
+// RenderedTips returns the app's tips with ${VAR} references resolved from its
+// base interpolation vars and .env — the operator-facing preview shown from the
+// tile menu (the settings editor shows the raw, still-templated text).
+func (r *Registry) RenderedTips(id string) (string, error) {
+	cfg, err := r.GetConfig(id)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return "", nil
-		}
 		return "", err
 	}
-	return string(b), nil
+	dir := filepath.Join(r.cfg.AppsDir(), id)
+	env, _ := os.ReadFile(filepath.Join(dir, ".env"))
+	return envinject.Render(cfg.Tips, r.cfg, id, env), nil
 }
 
-// SetNote persists (or clears) the user's per-app note. It touches only the
-// app-local note file — no Docker recreate, since the note is pure metadata.
-func (r *Registry) SetNote(id, note string) error {
+// SetTips persists (or clears) the app's editable tips into the override's
+// x-compose-app.tips key. Because tips never affect the running container, saving
+// touches only the override file — no Docker recreate. The base compose (the
+// store's shipped tips) is never mutated; the override's tips take precedence over
+// it (see mergedTips), and clearing them falls back to the store's.
+func (r *Registry) SetTips(id, tips string) error {
 	dir := filepath.Join(r.cfg.AppsDir(), id)
-	if _, err := os.Stat(dir); err != nil {
-		return err
+	basePath := filepath.Join(dir, "docker-compose.yml")
+	if _, err := os.Stat(basePath); err != nil {
+		return err // only managed apps have an editable config
 	}
-	notePath := filepath.Join(dir, noteFile)
-	if strings.TrimSpace(note) == "" {
-		if err := os.Remove(notePath); err != nil && !os.IsNotExist(err) {
+	overridePath := filepath.Join(dir, "docker-compose.override.yml")
+
+	doc := map[string]any{}
+	if raw, err := os.ReadFile(overridePath); err == nil {
+		_ = yaml.Unmarshal(raw, &doc)
+		if doc == nil {
+			doc = map[string]any{}
+		}
+	}
+
+	xca, _ := doc["x-compose-app"].(map[string]any)
+	if xca == nil {
+		xca = map[string]any{}
+	}
+	setOrDelete(xca, "tips", tips)
+	if len(xca) == 0 {
+		delete(doc, "x-compose-app")
+	} else {
+		doc["x-compose-app"] = xca
+	}
+
+	// Tips written by older CasaDash builds lived in the override's x-casaos block;
+	// drop them so they can't resurface once the x-compose-app tips are cleared.
+	if xc, ok := doc["x-casaos"].(map[string]any); ok {
+		delete(xc, "tips")
+		if len(xc) == 0 {
+			delete(doc, "x-casaos")
+		}
+	}
+
+	if len(doc) == 0 {
+		if err := os.Remove(overridePath); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 		return nil
 	}
-	return os.WriteFile(notePath, []byte(note), 0o644)
+	out, err := yaml.Marshal(doc)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(overridePath, out, 0o644)
 }
 
 // SetConfig writes the override file (or removes it when empty) and recreates
 // the app as base + override — CasaDash never mutates the store-provided base.
+//
+// The candidate is validated first: an override Compose won't parse is rejected
+// before it is written, so a typo can't leave an app whose stack no longer comes
+// up and whose config window is the only way to fix it.
 func (r *Registry) SetConfig(ctx context.Context, id, override string) error {
 	dir := filepath.Join(r.cfg.AppsDir(), id)
 	basePath := filepath.Join(dir, "docker-compose.yml")
 	if _, err := os.Stat(basePath); err != nil {
 		return err // only managed apps have an editable config
+	}
+	if err := r.ValidateOverride(ctx, id, override); err != nil {
+		return err
 	}
 	overridePath := filepath.Join(dir, "docker-compose.override.yml")
 
@@ -133,7 +186,7 @@ func (r *Registry) SetConfig(ctx context.Context, id, override string) error {
 	} else {
 		_ = os.Remove(overridePath)
 	}
-	return composecmd.Up(ctx, dir, id, files, envinject.Env(r.cfg, id))
+	return stackup.Up(ctx, r.cfg, id, dir, files)
 }
 
 // SetWebUI writes the opening-URL fields into the override's x-compose-app block
@@ -183,7 +236,7 @@ func (r *Registry) SetWebUI(ctx context.Context, id string, w WebUI) error {
 		}
 		files = append(files, overridePath)
 	}
-	return composecmd.Up(ctx, dir, id, files, envinject.Env(r.cfg, id))
+	return stackup.Up(ctx, r.cfg, id, dir, files)
 }
 
 // setOrDelete sets m[k]=v, or removes the key when v is blank.

@@ -1,7 +1,9 @@
 // Package installer installs a store app: it applies CasaOS env/template rules,
-// writes the compose project under the data root, and brings it up via
-// `docker compose` (the compose plugin, invoked out-of-process). Pre/post
-// install hooks from x-casaos run through /bin/bash, matching casa-img.
+// writes the compose project under the data root, and brings it up through
+// internal/stackup (folders → pre_up → `docker compose up -d` → post_up). The
+// install-only hooks (pre_install / post_install, x-compose-app or the x-casaos
+// commands they generalise) are run here, around that — they fire once, when the
+// app is first installed.
 package installer
 
 import (
@@ -9,20 +11,19 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/yundera/casadash/internal/apps"
 	"github.com/yundera/casadash/internal/appstore"
-	"github.com/yundera/casadash/internal/composecmd"
 	"github.com/yundera/casadash/internal/composefile"
 	"github.com/yundera/casadash/internal/config"
 	"github.com/yundera/casadash/internal/dockerx"
 	"github.com/yundera/casadash/internal/envinject"
+	"github.com/yundera/casadash/internal/stackup"
 )
 
 // Event is a progress update emitted during installation. Progress is split into
@@ -86,13 +87,40 @@ func New(cfg config.Config, store *appstore.Manager, dx *dockerx.Client) *Instal
 	return &Installer{cfg: cfg, store: store, dx: dx, installs: map[string]*InstallState{}}
 }
 
+// ProjectFor resolves the compose project name a store app would install as.
+// The store panel needs it to look up that app's backups, and it cannot derive it
+// itself: projectName prefers the compose file's own `name:`, which only the
+// server has.
+//
+// storeURL, when set, pins the lookup to that store instead of the merged
+// catalog (see appstore.Manager.GetFrom).
+func (in *Installer) ProjectFor(ctx context.Context, storeURL, id string) (string, error) {
+	_, raw, err := in.store.GetFrom(ctx, storeURL, id)
+	if err != nil {
+		return "", err
+	}
+	f, err := composefile.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("parse compose: %w", err)
+	}
+	return projectName(f.Name, id), nil
+}
+
 // StartInstall launches a detached install of store app `id` and tracks its
 // progress so it rides the live app list. The install runs on a background
 // context, so it is NOT cancelled when the caller (e.g. the store panel) goes
 // away. Idempotent: a second call while the same project is installing is a
 // no-op. Returns the resolved compose project name (the app's tile id).
-func (in *Installer) StartInstall(id string) (string, error) {
-	app, raw, err := in.store.Get(id)
+//
+// fromBackup, when set, names an uninstall archive of this app (see
+// apps.ListBackups): it is restored as the app's folder before the install runs,
+// so the app comes back with its old data and .env instead of a clean slate.
+//
+// storeURL, when set, installs the app from that store rather than from the
+// merged catalog — the store need not be a configured source. It is recorded as
+// the app's update reference, so later updates keep coming from the same store.
+func (in *Installer) StartInstall(ctx context.Context, storeURL, id, fromBackup string) (string, error) {
+	app, raw, err := in.store.GetFrom(ctx, storeURL, id)
 	if err != nil {
 		return "", err
 	}
@@ -116,7 +144,8 @@ func (in *Installer) StartInstall(id string) (string, error) {
 	in.notify()
 
 	go func() {
-		err := in.Install(context.Background(), id, func(ev Event) {
+		// Deliberately not the caller's ctx: the install must outlive the request.
+		err := in.Install(context.Background(), storeURL, id, fromBackup, func(ev Event) {
 			in.mu.Lock()
 			if st := in.installs[project]; st != nil {
 				st.Phase, st.Message, st.Download, st.Start = ev.Phase, ev.Message, ev.Download, ev.Start
@@ -172,12 +201,15 @@ func (in *Installer) notify() {
 
 // Install fetches app `id`, transforms its compose, writes it, and brings the
 // stack up — emitting progress events (safe to pass a nil emit).
-func (in *Installer) Install(ctx context.Context, id string, emit func(Event)) error {
+//
+// fromBackup, when set, restores that uninstall archive as the app's folder first
+// (see StartInstall). storeURL, when set, pins the app to that store.
+func (in *Installer) Install(ctx context.Context, storeURL, id, fromBackup string, emit func(Event)) error {
 	if emit == nil {
 		emit = func(Event) {}
 	}
 
-	app, raw, err := in.store.Get(id)
+	app, raw, err := in.store.GetFrom(ctx, storeURL, id)
 	if err != nil {
 		return err
 	}
@@ -186,10 +218,9 @@ func (in *Installer) Install(ctx context.Context, id string, emit func(Event)) e
 	if err != nil {
 		return fmt.Errorf("parse compose: %w", err)
 	}
-	si, _ := f.StoreInfo()
-	main, pre, post := "", "", ""
-	if si != nil {
-		main, pre, post = si.Main, si.PreInstallCmd, si.PostInstallCmd
+	main := ""
+	if si, _ := f.StoreInfo(); si != nil {
+		main = si.Main
 	}
 
 	project := projectName(f.Name, id)
@@ -200,6 +231,18 @@ func (in *Installer) Install(ctx context.Context, id string, emit func(Event)) e
 	}
 
 	appDir := filepath.Join(in.cfg.AppsDir(), project)
+
+	// Restore before anything writes to appDir: RestoreBackup refuses to overwrite
+	// an existing folder, and the install below is deliberately non-destructive on
+	// top of what it finds — the strict docker-compose.yml is refreshed from the
+	// store, while the restored .env and data are left exactly as they were.
+	if fromBackup != "" {
+		emit(Event{Phase: "prepare", Message: "Restoring backup " + fromBackup})
+		if err := apps.RestoreBackup(in.cfg.AppsDir(), project, fromBackup); err != nil {
+			return fmt.Errorf("restore backup: %w", err)
+		}
+	}
+
 	if err := os.MkdirAll(appDir, 0o755); err != nil {
 		return err
 	}
@@ -225,35 +268,40 @@ func (in *Installer) Install(ctx context.Context, id string, emit func(Event)) e
 		return err
 	}
 
-	for _, dir := range envinject.VolumeDirs(raw, in.cfg) {
-		if err := os.MkdirAll(dir, 0o755); err == nil {
-			chownPUID(dir, in.cfg)
-		}
+	files := []string{composePath}
+	if override := filepath.Join(appDir, "docker-compose.override.yml"); fileExists(override) {
+		files = append(files, override)
+	}
+
+	// Create the app's folders before anything else touches them — the pre_install
+	// hook below routinely seeds config files into them. stackup.Up ensures them
+	// again at up time (idempotent), so an app started later still gets them.
+	spec := stackup.Load(files)
+	if err := stackup.Prepare(in.cfg, project, appDir, files, spec); err != nil {
+		return err
 	}
 
 	// Track 1 — Download: pull images with real progress (0 → 100%).
 	in.pullImages(ctx, f, emit)
 
-	env := envinject.Env(in.cfg, project)
-
-	if pre != "" {
+	// The install hooks run exactly once, here; the up hooks run inside stackup.Up
+	// on this and every later start.
+	if h := spec.Hooks.PreInstall; h != "" {
 		emit(Event{Phase: "prepare", Message: "Running pre-install", Download: 100})
-		if err := runHook(ctx, envinject.RewriteToHostPath(pre, in.cfg), env, project); err != nil {
-			return fmt.Errorf("pre-install: %w", err)
+		if err := stackup.RunHook(ctx, in.cfg, project, appDir, h); err != nil {
+			return fmt.Errorf("pre_install hook: %w", err)
 		}
 	}
 
 	// Track 2 — Start: bring the stack up, then follow Docker until it is running.
 	emit(Event{Phase: "start", Message: "Starting containers", Download: 100, Start: 15})
-	files := []string{composePath}
-	if override := filepath.Join(appDir, "docker-compose.override.yml"); fileExists(override) {
-		files = append(files, override)
-	}
-	if err := composecmd.Up(ctx, appDir, project, files, env); err != nil {
+	if err := stackup.Up(ctx, in.cfg, project, appDir, files); err != nil {
 		return err
 	}
-	if post != "" {
-		_ = runHook(ctx, envinject.RewriteToHostPath(post, in.cfg), env, project)
+	if h := spec.Hooks.PostInstall; h != "" {
+		if err := stackup.RunHook(ctx, in.cfg, project, appDir, h); err != nil {
+			log.Printf("%s: post_install hook: %v", project, err)
+		}
 	}
 	// `compose up -d` returns once containers are created/started; follow their
 	// live Docker state (and health checks) so the Start bar reflects real
@@ -334,30 +382,7 @@ func (in *Installer) awaitStart(ctx context.Context, project string, emit func(E
 	}
 }
 
-// chownPUID sets ownership of a freshly-created app directory to PUID:PGID so
-// the app (which usually drops privileges) can write to it.
-func chownPUID(dir string, cfg config.Config) {
-	uid, err1 := strconv.Atoi(cfg.PUID)
-	gid, err2 := strconv.Atoi(cfg.PGID)
-	if err1 == nil && err2 == nil {
-		_ = os.Chown(dir, uid, gid)
-	}
-}
-
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
-}
-
-func runHook(ctx context.Context, script string, env []string, appID string) error {
-	cmd := exec.CommandContext(ctx, "/bin/bash", "-c", script)
-	cmd.Env = append(env,
-		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-		"DOCKER_HOST=unix:///var/run/docker.sock",
-		"AppID="+appID,
-	)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("%w: %s", err, out)
-	}
-	return nil
 }

@@ -1,26 +1,51 @@
 <script lang="ts">
-  import { fetchStoreApp, type StoreApp } from '../../stores/store'
+  import { fetchStoreApp, fetchStoreSources, type StoreApp } from '../../stores/store'
   import { t } from '../../i18n'
   import { renderMarkdown } from '../../markdown'
   import InstallButton from './InstallButton.svelte'
 
   let {
     id,
+    store = '',
     installed = false,
     onback,
-  }: { id: string; installed?: boolean; onback: () => void } = $props()
+  }: { id: string; store?: string; installed?: boolean; onback: () => void } = $props()
 
   let app = $state<StoreApp | null>(null)
   let loading = $state(true)
   let error = $state('')
+  let sources = $state<string[] | null>(null) // null until known — don't warn early
 
   $effect(() => {
     loading = true
-    fetchStoreApp(id)
+    // `store` (from /store/<id>?store=<url>) pins the lookup to one store, which
+    // may be a store the user has not added; without it the merged catalog answers.
+    fetchStoreApp(id, store)
       .then((a) => (app = a))
       .catch((e) => (error = String(e)))
       .finally(() => (loading = false))
   })
+
+  // A deep link can point at a store that is not one of the configured sources.
+  // That still installs, but the user should see whose app they are about to run.
+  $effect(() => {
+    fetchStoreSources()
+      .then((s) => (sources = s.sources))
+      .catch(() => (sources = []))
+  })
+
+  const unlisted = $derived(!!app?.store && !!sources && !sources.includes(app.store))
+
+  // Short "owner/repo" (or host) label for a store URL — mirrors StoreSources.
+  function storeLabel(u: string): string {
+    try {
+      const p = new URL(u)
+      const seg = p.pathname.split('/').filter(Boolean)
+      return seg.length >= 2 ? `${seg[0]}/${seg[1]}` : p.hostname
+    } catch {
+      return u
+    }
+  }
 </script>
 
 <div class="detail">
@@ -29,12 +54,23 @@
   {#if loading}
     <p class="muted">{$t('loading')}</p>
   {:else if app}
+    {#if unlisted}
+      <div class="warning" role="alert">
+        <span class="sign">⚠</span>
+        <div>
+          <strong>{$t('unlisted_store')}</strong>
+          <span class="src" title={app.store}>{storeLabel(app.store)}</span>
+          <p class="hint">{$t('unlisted_store_hint')}</p>
+        </div>
+      </div>
+    {/if}
+
     <header class="app-header">
       <img class="plate" src={app.icon} alt="" />
       <div class="meta">
         <h1>{app.name}</h1>
         <p class="tagline">{app.tagline}</p>
-        <InstallButton {id} {installed} size="normal" />
+        <InstallButton {id} store={app.store} {installed} size="normal" />
       </div>
     </header>
 
@@ -87,6 +123,35 @@
     font-size: 0.95rem;
     cursor: pointer;
     padding: 0;
+  }
+  /* Shown when the app comes from a store that is not one of the user's sources
+     — a deep link can carry any store URL. */
+  .warning {
+    display: flex;
+    gap: 0.6rem;
+    align-items: flex-start;
+    padding: 0.7rem 0.9rem;
+    border-radius: 8px;
+    background: hsla(45, 100%, 51%, 0.14);
+    border: 1px solid hsla(45, 90%, 40%, 0.35);
+    color: hsl(38, 62%, 28%);
+    font-size: 0.85rem;
+  }
+  .warning .sign {
+    font-size: 1rem;
+    line-height: 1.2;
+  }
+  .warning strong {
+    font-weight: 600;
+  }
+  .warning .src {
+    margin-left: 0.35rem;
+    font-family: monospace;
+    font-size: 0.8rem;
+  }
+  .warning .hint {
+    margin: 0.15rem 0 0;
+    color: hsl(38, 35%, 35%);
   }
   .app-header {
     display: flex;

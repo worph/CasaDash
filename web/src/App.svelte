@@ -6,23 +6,31 @@
   import AppSection from './lib/components/AppSection.svelte'
   import StorePanel from './lib/components/store/StorePanel.svelte'
   import AppSettingsModal from './lib/components/AppSettingsModal.svelte'
+  import TipsModal from './lib/components/TipsModal.svelte'
   import UninstallDialog from './lib/components/UninstallDialog.svelte'
   import { live } from './lib/live/ws'
   import { subscribeSystem } from './lib/stores/system'
-  import { storeOpen, settingsApp, uninstallTarget } from './lib/stores/ui'
+  import { storeOpen, settingsApp, tipsApp, uninstallTarget } from './lib/stores/ui'
+  import { openStore, start as startRouter } from './lib/route'
   import { loadSettings } from './lib/stores/settings'
 
   onMount(() => {
     live.connect()
     loadSettings()
     const off = subscribeSystem()
+    // The path drives the store view (/store, /store/<app>); the older hash links
+    // are still honoured once, at mount.
+    const stopRouter = startRouter()
     const h = location.hash
-    if (h === '#store') storeOpen.set(true)
+    if (h === '#store') openStore()
     else if (h.startsWith('#settings:')) {
       const id = h.slice('#settings:'.length)
       settingsApp.set({ id, name: id, managed: true })
     }
-    return off
+    return () => {
+      stopRouter()
+      off()
+    }
   })
 </script>
 
@@ -53,6 +61,10 @@
     managed={$settingsApp.managed}
     onclose={() => settingsApp.set(null)}
   />
+{/if}
+
+{#if $tipsApp}
+  <TipsModal target={$tipsApp} />
 {/if}
 
 {#if $uninstallTarget}

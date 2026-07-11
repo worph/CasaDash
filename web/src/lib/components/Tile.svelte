@@ -3,7 +3,7 @@
   import { clickOutside } from '../actions'
   import { appAction, openApp, appUrl, type App } from '../stores/apps'
   import { removeLink, type Link } from '../stores/links'
-  import { storeOpen, settingsApp, uninstallTarget, tileDragging } from '../stores/ui'
+  import { storeOpen, settingsApp, tipsApp, uninstallTarget, tileDragging } from '../stores/ui'
   import { t } from '../i18n'
 
   export type TileData =
@@ -101,6 +101,14 @@
               settingsApp.set({ id: tile.app.id, name: tile.app.name, managed: tile.app.managed })
           }}>{$t('settings')}</button
         >
+        {#if tile.app.managed}
+          <button
+            onclick={() => {
+              menuOpen = false
+              if (tile.kind === 'app') tipsApp.set({ id: tile.app.id, name: tile.app.name })
+            }}>{$t('tips')}</button
+          >
+        {/if}
         {#if tile.app.status === 'stopped'}
           <button onclick={() => act('start')}>{$t('start')}</button>
         {:else}

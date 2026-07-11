@@ -8,6 +8,7 @@
   "used": "Belegt",
   "total": "Gesamt",
   "settings": "Einstellungen",
+  "tips": "Tipps",
   "language": "Sprache",
   "wallpaper": "Hintergrund",
   "widgets": "Widgets",
@@ -38,5 +39,12 @@
   "back": "Zurück",
   "cancel": "Abbrechen",
   "add": "Hinzufügen",
-  "loading": "Lädt…"
+  "loading": "Lädt…",
+  "unlisted_store": "Diese App stammt aus einem Store, den Sie nicht hinzugefügt haben:",
+  "unlisted_store_hint": "Installieren Sie sie nur, wenn Sie dieser Quelle vertrauen.",
+  "fresh_install": "Neuinstallation",
+  "restore_from_backup": "Aus Backup wiederherstellen",
+  "restore_from_backup_hint": "Installiert die App auf den Daten und der .env dieses Backups neu.",
+  "backup_zip": "ZIP",
+  "backup_folder": "Ordner"
 }

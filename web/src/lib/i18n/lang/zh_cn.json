@@ -8,6 +8,7 @@
   "used": "已用",
   "total": "总计",
   "settings": "设置",
+  "tips": "提示",
   "language": "语言",
   "wallpaper": "壁纸",
   "widgets": "小组件",
@@ -38,5 +39,12 @@
   "back": "返回",
   "cancel": "取消",
   "add": "添加",
-  "loading": "加载中…"
+  "loading": "加载中…",
+  "unlisted_store": "此应用来自您未添加的商店：",
+  "unlisted_store_hint": "请仅在信任该来源时安装。",
+  "fresh_install": "全新安装",
+  "restore_from_backup": "从备份恢复",
+  "restore_from_backup_hint": "在该备份的数据和 .env 之上重新安装应用。",
+  "backup_zip": "压缩包",
+  "backup_folder": "文件夹"
 }

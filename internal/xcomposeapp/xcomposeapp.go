@@ -27,7 +27,8 @@ var (
 )
 
 // SchemaVersion is the highest x-compose-app schema this build understands.
-const SchemaVersion = 1
+// v2 added `folders` and `hooks`; v1 files keep working unchanged.
+const SchemaVersion = 2
 
 // App is the CasaDash-native app metadata. Only the fields CasaDash consumes are
 // modelled; unknown keys are ignored.
@@ -44,6 +45,11 @@ type App struct {
 	Thumbnail     string    `yaml:"thumbnail,omitempty"`
 	Architectures []string  `yaml:"architectures,omitempty"`
 
+	// Tips is the app's guidance note (Markdown, may reference ${VAR}). It is also
+	// where CasaDash persists operator edits — into the override's x-compose-app
+	// block, never into the store-provided base compose.
+	Tips Localized `yaml:"tips,omitempty"`
+
 	// The click URL, declared directly (see package doc).
 	WebUIHost   string `yaml:"webui-host,omitempty"`
 	WebUIPort   string `yaml:"webui-port,omitempty"`
@@ -58,6 +64,82 @@ type App struct {
 	StoreAppID string `yaml:"store-app-id,omitempty"`
 
 	Links []Link `yaml:"links,omitempty"`
+
+	// Lifecycle: directories ensured before every `compose up`, and the shell
+	// hooks that bracket install and up. See docs/x-compose-app.md.
+	Folders []Folder `yaml:"folders,omitempty"`
+	Hooks   Hooks    `yaml:"hooks,omitempty"`
+}
+
+// Folder is a directory CasaDash creates (and takes ownership of) before it
+// brings the stack up, so an app that drops privileges can write to its bind
+// mounts on first boot. Paths live under the data root and may use the app's
+// interpolation variables (${DATA_ROOT}, ${AppID}, ${PUID}, …).
+type Folder struct {
+	Path string `yaml:"path,omitempty"`
+	// User and Group are a uid/gid or a name; both default to the deployment's
+	// PUID/PGID.
+	User  string `yaml:"user,omitempty"`
+	Group string `yaml:"group,omitempty"`
+	// Mode is an octal permission string, applied to Path itself. It must be
+	// QUOTED in YAML (mode: "0755") — a bare 0755 is an octal int to YAML, and the
+	// extension block is round-tripped through map[string]any before it reaches
+	// here, which would drop the leading zero and leave a meaningless 493.
+	Mode string `yaml:"mode,omitempty"`
+	// Recursive applies User/Group to everything already inside Path, not just
+	// Path itself — for apps that need to reclaim a tree restored from a backup.
+	Recursive bool `yaml:"recursive,omitempty"`
+}
+
+// UnmarshalYAML accepts either a bare path ("- /DATA/AppData/app/config") or the
+// full mapping form.
+func (f *Folder) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind == yaml.ScalarNode {
+		f.Path = n.Value
+		return nil
+	}
+	// Scalars are decoded as text so `mode: 0755` and `user: 1000` (which YAML
+	// would otherwise type as ints) survive as written.
+	var raw struct {
+		Path      text `yaml:"path"`
+		User      text `yaml:"user"`
+		Group     text `yaml:"group"`
+		Mode      text `yaml:"mode"`
+		Recursive bool `yaml:"recursive"`
+	}
+	if err := n.Decode(&raw); err != nil {
+		return err
+	}
+	*f = Folder{
+		Path:      string(raw.Path),
+		User:      string(raw.User),
+		Group:     string(raw.Group),
+		Mode:      string(raw.Mode),
+		Recursive: raw.Recursive,
+	}
+	return nil
+}
+
+// text is a string that accepts any YAML scalar verbatim, keeping `0755` octal
+// and `1000` numeric values from being retyped.
+type text string
+
+func (t *text) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind != yaml.ScalarNode {
+		return errors.New("expected a scalar")
+	}
+	*t = text(n.Value)
+	return nil
+}
+
+// Hooks are host shell snippets run around an app's lifecycle. The install hooks
+// run once, when CasaDash first installs the app; the up hooks run on every
+// `docker compose up` (install, start, update, config save).
+type Hooks struct {
+	PreInstall  string `yaml:"pre_install,omitempty"`
+	PostInstall string `yaml:"post_install,omitempty"`
+	PreUp       string `yaml:"pre_up,omitempty"`
+	PostUp      string `yaml:"post_up,omitempty"`
 }
 
 // Link is an extra button on the app detail view (absolute URL only).
