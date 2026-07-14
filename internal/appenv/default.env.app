@@ -1,0 +1,53 @@
+# .env.app — the variables CasaDash forwards into every app.
+#
+# This file belongs to the DEPLOYMENT, not to CasaDash. On a Yundera PCS it is
+# written by the orchestrator; on a plain install it is yours to edit. CasaDash
+# creates it once, with the defaults below, and never overwrites it again.
+#
+# On install, and again on every start, CasaDash reads this file and ensures each
+# key in the app's own .env — a key already there is set to the value here, a key
+# missing is appended. Order does not matter, in either file. Nothing else in an
+# app's .env is touched: keys you add there yourself are the app's, and survive.
+#
+# That is the whole separation. What an app receives is stated here. What CasaDash
+# needs to run itself stays in its own environment (DATA_ROOT, APPSTORE_URL,
+# PROTECTED_APPS, …) and is never forwarded.
+#
+# A few variables are NOT listed here because CasaDash derives them per app and
+# per install — AppID, PUID, PGID, TZ, DATA_ROOT, DATA_HOST_PATH. They are merged
+# in automatically. Setting them here has no effect.
+#
+# An empty value is treated as "not set": the key is skipped rather than written
+# blank, so an app never ends up with APP_DOMAIN= and a Caddy route pointing at
+# nothing. Comment a line out, or leave it empty, to not forward it.
+
+# --- placement -------------------------------------------------------------
+# The external Docker network every app's main service is attached to. It must
+# already exist. Empty = attach no network. CasaDash's own compose creates `mesh`;
+# a Yundera PCS uses `pcs`.
+APP_NET=mesh
+
+# --- routing ---------------------------------------------------------------
+# The deployment's base domain and public IP. Store apps template their Caddy
+# labels with these (`myapp-${APP_DOMAIN}`, `myapp-${APP_PUBLIC_IP_DASH}.sslip.io`),
+# so if the box moves, every app follows on its next start. Leave empty on a local
+# install with no reverse proxy — apps then have no reachable web address.
+APP_DOMAIN=
+APP_PUBLIC_IP=
+APP_PUBLIC_IP_DASH=
+APP_PUBLIC_IPV4=
+APP_PUBLIC_IPV4_DASH=
+APP_PUBLIC_IPV6=
+APP_PUBLIC_IPV6_DASH=
+
+# Lowercase alias: some store apps' x-compose-app `webui-host` uses ${domain}.
+domain=
+
+# --- identity --------------------------------------------------------------
+# Seeded into apps that provision an admin account on first boot. These are
+# consumed once, when the app initialises its own database — changing them later
+# does not rotate anything already provisioned.
+APP_EMAIL=
+APP_DEFAULT_PASSWORD=casaos
+DefaultUserName=admin
+DefaultPassword=casaos

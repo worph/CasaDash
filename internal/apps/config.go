@@ -58,7 +58,7 @@ func (r *Registry) GetConfig(id string) (*Config, error) {
 				Host:   ca.WebUIHost,
 				Port:   ca.WebUIPort,
 				Path:   ca.WebUIPath,
-				URL:    ca.WebURL(r.cfg.RefDomain),
+				URL:    ca.WebURL(r.cfg.AppDomain()),
 			}
 		}
 		cfg.Tips = mergedTips(si, ca)

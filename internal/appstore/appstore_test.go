@@ -33,8 +33,8 @@ func storeZip(t *testing.T, appName string) []byte {
 // counts how many times it actually sent a body.
 type storeServer struct {
 	*httptest.Server
-	etag  string
-	body  []byte
+	etag   string
+	body   []byte
 	bodies int // times the full zip was transferred
 	gets   int // total GETs (including 304s)
 }

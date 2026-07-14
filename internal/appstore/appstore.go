@@ -30,7 +30,7 @@ type CatalogApp struct {
 	ID          string   `json:"id"`   // compose project name (Apps/<name>)
 	Name        string   `json:"name"` // display title
 	Tagline     string   `json:"tagline"`
-	Description  string   `json:"description"`
+	Description string   `json:"description"`
 	Icon        string   `json:"icon"`
 	Thumbnail   string   `json:"thumbnail"`
 	Screenshots []string `json:"screenshots"`

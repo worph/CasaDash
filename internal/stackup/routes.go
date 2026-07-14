@@ -8,7 +8,6 @@ import (
 
 	"github.com/yundera/casadash/internal/caddyroutes"
 	"github.com/yundera/casadash/internal/config"
-	"github.com/yundera/casadash/internal/envinject"
 )
 
 // SyncRoutes reconciles the app's generated Caddy routes — the ones publishing it
@@ -63,10 +62,9 @@ func SyncRoutes(cfg config.Config, project, dir string, files []string) []string
 		}
 	}
 
-	if err := envinject.SeedVars(cfg, project, filepath.Join(dir, ".env"),
-		caddyroutes.Vars(base, doms)); err != nil {
-		log.Printf("%s: seed route vars: %v", project, err)
-	}
+	// The variables these routes interpolate (${APP_DOMAIN}, ${APP_PUBLIC_IP_DASH}, …)
+	// are not seeded here: they are the deployment's, and Normalize ensures them into
+	// the app's .env from .env.app on this same up.
 
 	return composeFiles(basePath, overridePath)
 }

@@ -29,7 +29,7 @@ import (
 // (rather than an app gateway host it is catching for). With no gateway domain
 // configured, every request is treated as the dashboard (the gate is inert).
 func (s *Server) isDashboardHost(hostport string) bool {
-	if s.cfg.RefDomain == "" {
+	if s.cfg.AppDomain() == "" {
 		return true
 	}
 	host := hostport
@@ -39,9 +39,9 @@ func (s *Server) isDashboardHost(hostport string) bool {
 	host = strings.ToLower(host)
 	switch host {
 	case "", "localhost", "127.0.0.1",
-		s.cfg.RefDomain,
-		"casadash-" + s.cfg.RefDomain,
-		"casaos-" + s.cfg.RefDomain:
+		s.cfg.AppDomain(),
+		"casadash-" + s.cfg.AppDomain(),
+		"casaos-" + s.cfg.AppDomain():
 		return true
 	}
 	return false
@@ -59,7 +59,7 @@ func (s *Server) gateRouter() http.Handler {
 }
 
 func (s *Server) gateWhoami(w http.ResponseWriter, r *http.Request) {
-	app, ok := s.apps.FindByHost(r.Context(), r.Host, s.cfg.RefDomain)
+	app, ok := s.apps.FindByHost(r.Context(), r.Host, s.cfg.AppDomain())
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown app host"})
 		return
@@ -73,7 +73,7 @@ func (s *Server) gateWhoami(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) gateStart(w http.ResponseWriter, r *http.Request) {
-	app, ok := s.apps.FindByHost(r.Context(), r.Host, s.cfg.RefDomain)
+	app, ok := s.apps.FindByHost(r.Context(), r.Host, s.cfg.AppDomain())
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown app host"})
 		return

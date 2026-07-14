@@ -1,13 +1,14 @@
 // Package envinject reproduces CasaOS/casa-img's environment and template
 // handling for store apps: the base interpolation variables (consumed by
 // `docker compose` interpolation) and the PCS structural transforms
-// (DATA_ROOT volume rewrite, external REF_NET attach, PUID:PGID user).
+// (DATA_ROOT volume rewrite, external APP_NET attach, PUID:PGID user).
 //
 // Ported from casa-img CasaOS-AppManagement: service/compose_service.go
 // (baseInterpolationMap) and route/v2/appstore_pcs.go (modifyServices).
 package envinject
 
 import (
+	"bytes"
 	"os"
 	"path"
 	"sort"
@@ -18,9 +19,14 @@ import (
 	"github.com/yundera/casadash/internal/config"
 )
 
-// BaseVars returns the CasaOS/casa-img base interpolation variables for an app
-// (PUID, PGID, TZ, DATA_ROOT, REF_*, AppID, …). These are what `docker compose`
-// substitutes into ${VAR} references and what CasaDash seeds an app's .env with.
+// BaseVars returns the variables CasaDash computes for an app itself — the ones
+// that depend on the app or on where CasaDash is installed, and so cannot be stated
+// in the deployment's .env.app: the app's ID, the identity its files are owned by,
+// and the data root.
+//
+// Everything else an app receives comes from .env.app (see internal/appenv), which
+// merges these in. CasaDash's own configuration — APPSTORE_URL, PROTECTED_APPS, the
+// listen address — is not here and is never forwarded to an app.
 func BaseVars(cfg config.Config, appID string) map[string]string {
 	tz := cfg.TZ
 	if tz == "" {
@@ -28,22 +34,61 @@ func BaseVars(cfg config.Config, appID string) map[string]string {
 	}
 	// DATA_ROOT / DATA_HOST_PATH are exported as the HOST path: `${DATA_ROOT}` in
 	// an app's compose is a bind-mount source, and the host daemon resolves it.
-	extra := map[string]string{
-		"AppID":           appID,
-		"DefaultUserName": "admin",
-		"DefaultPassword": "casaos",
-		"PUID":            cfg.PUID,
-		"PGID":            cfg.PGID,
-		"TZ":              tz,
-		"DATA_ROOT":       cfg.DataHostPath,
-		"DATA_HOST_PATH":  cfg.DataHostPath,
+	return map[string]string{
+		"AppID":          appID,
+		"PUID":           cfg.PUID,
+		"PGID":           cfg.PGID,
+		"TZ":             tz,
+		"DATA_ROOT":      cfg.DataHostPath,
+		"DATA_HOST_PATH": cfg.DataHostPath,
 	}
-	addIf(extra, "REF_NET", cfg.RefNet)
-	addIf(extra, "REF_PORT", cfg.RefPort)
-	addIf(extra, "REF_SCHEME", cfg.RefScheme)
-	addIf(extra, "REF_DOMAIN", cfg.RefDomain)
-	addIf(extra, "REF_SEPARATOR", cfg.RefSep)
-	return extra
+}
+
+// EnsureVars ensures each of vars in an app's .env, key by key.
+//
+// A key already in the file is set to its current value, in the line it already
+// occupies; a key that is missing is appended. Nothing is reordered, nothing else
+// is rewritten, and nothing is ever removed — so the file's own ordering does not
+// matter, neither does .env.app's, and a variable the operator added themselves is
+// left exactly where it is.
+//
+// Appended keys are sorted, so a fresh .env is deterministic rather than in Go's
+// map order.
+func EnsureVars(envPath string, vars map[string]string) error {
+	raw, err := os.ReadFile(envPath)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+
+	out := []Var{}
+	have := make(map[string]bool, len(vars))
+	for _, v := range ParseEnvFile(raw) {
+		if val, ok := vars[v.Key]; ok {
+			v.Value = val // ours: refresh it where it stands
+			have[v.Key] = true
+		}
+		out = append(out, v)
+	}
+
+	missing := make([]string, 0, len(vars))
+	for k := range vars {
+		if !have[k] {
+			missing = append(missing, k)
+		}
+	}
+	sort.Strings(missing)
+	for _, k := range missing {
+		out = append(out, Var{Key: k, Value: vars[k]})
+	}
+
+	patched, err := PatchEnvFile(raw, out)
+	if err != nil {
+		return err
+	}
+	if bytes.Equal(patched, raw) {
+		return nil // nothing drifted — don't touch the file's mtime
+	}
+	return os.WriteFile(envPath, patched, 0o644)
 }
 
 // Env returns the process environment plus the base interpolation variables so
@@ -54,27 +99,6 @@ func Env(cfg config.Config, appID string) []string {
 		env = append(env, k+"="+v)
 	}
 	return env
-}
-
-// EnvFile renders the base variables as the contents of an app's .env file
-// (sorted `KEY=VALUE` lines). CasaDash prefills this on install so the app's
-// compose resolves offline and the operator can hand-edit it afterwards — the
-// .env is the app's persistent variable record. See docs/app-model.md.
-func EnvFile(cfg config.Config, appID string) []byte {
-	vars := BaseVars(cfg, appID)
-	keys := make([]string, 0, len(vars))
-	for k := range vars {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	var b strings.Builder
-	for _, k := range keys {
-		b.WriteString(k)
-		b.WriteByte('=')
-		b.WriteString(vars[k])
-		b.WriteByte('\n')
-	}
-	return []byte(b.String())
 }
 
 // Render substitutes ${VAR} / $VAR references in s using the same variables the
@@ -123,62 +147,24 @@ func EnvFileVars(b []byte) map[string]string {
 	return out
 }
 
-// SeedVars appends the named variables to an app's .env when they are missing,
-// taking each value from the environment CasaDash itself runs with.
-//
-// An app's compose references deployment variables that live in CasaDash's
-// environment but not in its own base variables — the Caddy labels are templated
-// with ${APP_DOMAIN} and ${APP_PUBLIC_IP_DASH}. `docker compose` run *by CasaDash*
-// resolves those from the process environment (see Env), but a `docker compose
-// up -d` the operator runs by hand in the app's folder has only the .env, and
-// would resolve them to nothing — silently routing the app at an empty host.
-// Seeding them keeps the folder self-contained, which is the whole promise of the
-// app model.
-//
-// Only missing keys are added, and nothing is reordered or rewritten: the .env is
-// the operator's file, and a value they changed by hand must win over the ambient
-// one, on every up, forever.
-func SeedVars(cfg config.Config, appID, envPath string, keys []string) error {
-	raw, err := os.ReadFile(envPath)
-	if err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	have := EnvFileVars(raw)
-	vars := BaseVars(cfg, appID)
-
-	var add strings.Builder
-	for _, k := range keys {
-		if _, ok := have[k]; ok {
-			continue
-		}
-		v, ok := vars[k]
-		if !ok {
-			v = os.Getenv(k)
-		}
-		if v == "" {
-			continue // nothing to seed it with — leave the reference unresolved
-		}
-		add.WriteString(k)
-		add.WriteByte('=')
-		add.WriteString(v)
-		add.WriteByte('\n')
-	}
-	if add.Len() == 0 {
-		return nil
-	}
-
-	out := raw
-	if len(out) > 0 && !strings.HasSuffix(string(out), "\n") {
-		out = append(out, '\n')
-	}
-	return os.WriteFile(envPath, append(out, add.String()...), 0o644)
-}
-
 // Transform applies the PCS structural rewrites to a store compose file:
-//   - rewrite volume sources under /DATA to the configured DATA_ROOT
-//   - attach the main service to the external REF_NET network (if set)
+//   - rewrite volume sources under /DATA to ${DATA_ROOT}
+//   - attach the main service to the external ${APP_NET} network (if set)
 //
-// It intentionally leaves ${VAR} interpolation to `docker compose`.
+// Both are written as *references*, never as the resolved value. That is what lets
+// an app survive a change to CasaDash's own deployment: the compose file says
+// "wherever the data root is" and "whatever the app network is", and every
+// `docker compose up` resolves that afresh against the .env SyncBaseVars keeps
+// current. Baking the values in — as CasaDash once did — froze the app to the
+// deployment it happened to be installed on, and left it unstartable, with
+// reinstall as the only way out, the moment that deployment moved.
+//
+// It is therefore idempotent, and running it over an already-transformed file is
+// how a stale one heals: a compose still carrying baked literals from an older
+// CasaDash comes back in reference form. stackup.Normalize does exactly that,
+// before every up.
+//
+// ${VAR} interpolation itself is left to `docker compose`.
 func Transform(raw []byte, cfg config.Config, mainService string) ([]byte, error) {
 	var doc map[string]any
 	if err := yaml.Unmarshal(raw, &doc); err != nil {
@@ -187,14 +173,10 @@ func Transform(raw []byte, cfg config.Config, mainService string) ([]byte, error
 
 	services, _ := doc["services"].(map[string]any)
 
-	// Rewrite literal /DATA volume sources to the host path so the host daemon
-	// resolves the bind mounts correctly (no-op when they already match).
-	if cfg.DataHostPath != "" && cfg.DataHostPath != "/DATA" {
-		rewriteDataRoot(services, cfg.DataHostPath)
-	}
+	rewriteDataRoot(services, cfg)
 
-	if cfg.RefNet != "" && services != nil {
-		attachExternalNetwork(doc, services, mainService, cfg.RefNet)
+	if cfg.AppNet() != "" && services != nil {
+		attachExternalNetwork(doc, services, mainService)
 	}
 
 	return yaml.Marshal(doc)
@@ -324,8 +306,10 @@ func addIf(m map[string]string, k, v string) {
 	}
 }
 
-// rewriteDataRoot replaces a leading "/DATA" in every volume source.
-func rewriteDataRoot(services map[string]any, dataRoot string) {
+// rewriteDataRoot points every data-root volume source at ${DATA_ROOT}, so the
+// host path is resolved by `docker compose` at up time rather than frozen into the
+// file.
+func rewriteDataRoot(services map[string]any, cfg config.Config) {
 	for _, s := range services {
 		svc, ok := s.(map[string]any)
 		if !ok {
@@ -338,39 +322,85 @@ func rewriteDataRoot(services map[string]any, dataRoot string) {
 		for i, v := range vols {
 			switch vol := v.(type) {
 			case string:
-				vols[i] = replaceLeadingDATA(vol, dataRoot)
+				vols[i] = refDataRoot(vol, cfg)
 			case map[string]any:
 				if src, ok := vol["source"].(string); ok {
-					vol["source"] = replaceLeadingDATA(src, dataRoot)
+					vol["source"] = refDataRoot(src, cfg)
 				}
 			}
 		}
 	}
 }
 
-func replaceLeadingDATA(s, dataRoot string) string {
-	const p = "/DATA"
-	if len(s) >= len(p) && s[:len(p)] == p {
-		return dataRoot + s[len(p):]
+// refDataRoot rewrites one bind source to the ${DATA_ROOT} form. It accepts the
+// store spelling (/DATA/...) and the resolved host spelling a previous Transform
+// under *this* config would have written — which is what makes Transform
+// idempotent. A source under neither (/etc/localtime, a named volume) is returned
+// untouched.
+//
+// A compose baked by a previous CasaDash whose DataHostPath differed from the
+// current one cannot be recognised here: the old prefix is not something this
+// process can know. Such a file is re-materialised from the store instead (see
+// installer.ApplyUpdate), which is a one-time cost — no compose written from here
+// on carries a literal to go stale.
+func refDataRoot(src string, cfg config.Config) string {
+	const ref = "${DATA_ROOT}"
+	if strings.HasPrefix(src, ref) || strings.HasPrefix(src, "$DATA_ROOT") {
+		return src // already a reference
 	}
-	return s
+	if rest, ok := strings.CutPrefix(src, "/DATA"); ok {
+		return ref + rest
+	}
+	if h := cfg.DataHostPath; h != "" && h != "/DATA" {
+		if rest, ok := strings.CutPrefix(src, h); ok {
+			return ref + rest
+		}
+	}
+	return src
 }
 
-// attachExternalNetwork adds an external network and joins the main service to it.
-func attachExternalNetwork(doc, services map[string]any, mainService, refNet string) {
+// AppNetKey is the compose-local key of the external network CasaDash attaches an
+// app's main service to. It is deliberately *not* the network's name: the name is
+// the deployment's (${APP_NET}, resolved at up time), while the key is a fixed
+// handle inside the project, so that changing the network the deployment uses does
+// not have to rewrite every service's `networks:` list.
+const AppNetKey = "appnet"
+
+// attachExternalNetwork joins the main service to the deployment's external
+// network, referenced as ${APP_NET} rather than by its current name.
+//
+// It also drops the network a previous CasaDash attached, recognisable by its
+// exact signature — an external network whose compose key *is* its name, which is
+// what `networks[refNet] = {name: refNet, external: true}` used to produce. That
+// entry names a network that may no longer exist (it names the one the app was
+// installed against), and leaving it behind would keep the stack unstartable even
+// once the right network is attached, since compose insists every declared
+// external network exists.
+func attachExternalNetwork(doc, services map[string]any, mainService string) {
 	networks, _ := doc["networks"].(map[string]any)
 	if networks == nil {
 		networks = map[string]any{}
 		doc["networks"] = networks
 	}
-	networks[refNet] = map[string]any{"name": refNet, "external": true}
+
+	for _, key := range staleNetworks(networks) {
+		delete(networks, key)
+		detachNetwork(services, key)
+	}
+
+	networks[AppNetKey] = map[string]any{"name": "${APP_NET}", "external": true}
 
 	// Default the main service to the first one if unspecified.
 	if mainService == "" {
+		names := make([]string, 0, len(services))
 		for name := range services {
-			mainService = name
-			break
+			names = append(names, name)
 		}
+		sort.Strings(names) // map order is random; the choice must not be
+		if len(names) == 0 {
+			return
+		}
+		mainService = names[0]
 	}
 	svc, ok := services[mainService].(map[string]any)
 	if !ok {
@@ -379,14 +409,93 @@ func attachExternalNetwork(doc, services map[string]any, mainService, refNet str
 	switch nets := svc["networks"].(type) {
 	case []any:
 		for _, n := range nets {
-			if s, ok := n.(string); ok && s == refNet {
+			if s, ok := n.(string); ok && s == AppNetKey {
 				return // already attached — avoid a duplicate list entry
 			}
 		}
-		svc["networks"] = append(nets, refNet)
+		svc["networks"] = append(nets, AppNetKey)
 	case map[string]any:
-		nets[refNet] = nil // idempotent
+		nets[AppNetKey] = nil // idempotent
 	default:
-		svc["networks"] = []any{refNet}
+		svc["networks"] = []any{AppNetKey}
+	}
+}
+
+// staleNetworks names the external networks a previous CasaDash attached, which
+// must be dropped before the current one is added. Left behind, they name a network
+// that may no longer exist — and compose insists every declared external network
+// does — so the stack would stay unstartable even once the right network is
+// attached.
+//
+// The discrimination that matters is against an external network the *store app*
+// declared, which we must never touch. It rests on how compose reads `name`: for an
+// external network, an omitted `name` means "the network is called after the key".
+// So a store app joining an existing network writes just
+//
+//	networks: {traefik: {external: true}}          → no `name` → not ours
+//
+// whereas every external network CasaDash has ever generated writes `name`
+// explicitly, and in one of exactly two shapes:
+//
+//	name: pcs                                      → the key, resolved (the original bug)
+//	name: ${APP_NET}  /  name: ${REF_NET}          → a reference (REF_NET being the old spelling)
+//
+// Hence: ours iff `name` is present and is either the key itself or an
+// interpolation reference. A store app that both names its external network *and*
+// names it after its own key would be misread — but that spelling is redundant, and
+// no CasaOS store app writes it.
+func staleNetworks(networks map[string]any) []string {
+	var stale []string
+	for key, n := range networks {
+		if key == AppNetKey {
+			continue // the one we are about to (re)write
+		}
+		net, ok := n.(map[string]any)
+		if !ok {
+			continue
+		}
+		if ext, _ := net["external"].(bool); !ext {
+			continue
+		}
+		name, named := net["name"].(string)
+		if !named {
+			continue // the store app's own — it never sets `name`
+		}
+		if name == key || strings.HasPrefix(name, "${") {
+			stale = append(stale, key)
+		}
+	}
+	sort.Strings(stale) // map order is random; the rewrite must not be
+	return stale
+}
+
+// detachNetwork removes key from every service's `networks:`, so a network we drop
+// leaves no dangling reference behind.
+func detachNetwork(services map[string]any, key string) {
+	for _, s := range services {
+		svc, ok := s.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch nets := svc["networks"].(type) {
+		case []any:
+			kept := make([]any, 0, len(nets))
+			for _, n := range nets {
+				if s, ok := n.(string); ok && s == key {
+					continue
+				}
+				kept = append(kept, n)
+			}
+			if len(kept) == 0 {
+				delete(svc, "networks")
+			} else {
+				svc["networks"] = kept
+			}
+		case map[string]any:
+			delete(nets, key)
+			if len(nets) == 0 {
+				delete(svc, "networks")
+			}
+		}
 	}
 }

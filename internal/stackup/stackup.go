@@ -93,11 +93,14 @@ func merge(base, over map[string]any) map[string]any {
 // swallowed: the stack is already running and tearing it back down would be worse
 // than a broken after-the-fact tweak.
 //
-// The app's generated Caddy routes are reconciled first, so every path into the
-// stack — install, start, store update, a config or .env save, an added domain —
-// publishes it on the domains the deployment currently answers on. See SyncRoutes.
+// The app's compose, .env and generated Caddy routes are reconciled with the
+// current deployment first, so every path into the stack — install, start, store
+// update, a config or .env save, an added domain — brings the app up against the
+// deployment as it is now, not as it was when the app was installed. See Normalize
+// and SyncRoutes.
 func Up(ctx context.Context, cfg config.Config, project, dir string, files []string) error {
 	files = SyncRoutes(cfg, project, dir, files)
+	Normalize(cfg, project, dir) // after SyncRoutes: the vars CasaDash owns win over its seeds
 	spec := Load(files)
 
 	if err := Prepare(cfg, project, dir, files, spec); err != nil {

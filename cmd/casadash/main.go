@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/yundera/casadash/internal/appenv"
 	"github.com/yundera/casadash/internal/config"
 	"github.com/yundera/casadash/internal/server"
 	"github.com/yundera/casadash/internal/ui"
@@ -23,6 +24,15 @@ func main() {
 	log.SetPrefix("casadash: ")
 
 	cfg := config.FromEnv()
+
+	// .env.app states what every app receives (see internal/appenv). Create it with
+	// the documented default when the deployment has none, then read it live: it is
+	// the deployment's file, and an edit to it must reach the next app start without
+	// restarting CasaDash.
+	if err := appenv.Ensure(cfg); err != nil {
+		log.Fatalf("app env: %v", err)
+	}
+	cfg.AppEnv = func() map[string]string { return appenv.Load(cfg) }
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,

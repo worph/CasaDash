@@ -1,6 +1,25 @@
 package config
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+)
+
+func TestStateDirDefaultsToCasaDashsOwnAppFolder(t *testing.T) {
+	c := Config{DataRoot: "/DATA"}
+	if got, want := c.StateDir(), filepath.Join("/DATA", "AppData", "casadash"); got != want {
+		t.Errorf("StateDir() = %q, want %q", got, want)
+	}
+}
+
+// CASADASH_STATE_DIR moves everything CasaDash owns — settings, store cache, and the
+// .env.app it reads the deployment's variables from.
+func TestStateDirOverride(t *testing.T) {
+	c := Config{DataRoot: "/DATA", StateDirPath: "/var/lib/casadash"}
+	if got, want := c.StateDir(), "/var/lib/casadash"; got != want {
+		t.Errorf("StateDir() = %q, want %q", got, want)
+	}
+}
 
 func TestIsProtected(t *testing.T) {
 	c := Config{ProtectedApps: []string{"casadash", "CasaOS"}}

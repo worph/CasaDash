@@ -6,7 +6,8 @@ services:
     hostname: casadash
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      # Host port is configurable; the container always listens on 8080.
+      - "${HOST_PORT:-8080}:8080"
     environment:
       # Path INSIDE the container where the data folder is mounted (fixed target).
       DATA_ROOT: "/DATA"
@@ -18,11 +19,12 @@ services:
       PUID: "1000"
       PGID: "1000"
       TZ: "${TZ:-UTC}"
-      # App-store routing template (CasaOS/casa-img compatible). Optional.
-      REF_NET: "mesh"
-      REF_PORT: "80"
-      REF_SCHEME: "http"
-      REF_DOMAIN: "${DOMAIN:-}"
+      # NOTE: the variables CasaDash forwards to the apps it installs (APP_NET,
+      # APP_DOMAIN, APP_PUBLIC_IP_DASH, …) are deliberately NOT here. They live in
+      # the deployment's own file, ${DATA_HOST_PATH}/AppData/casadash/.env.app,
+      # which CasaDash creates with a documented default on first boot. Keeping them
+      # out of this compose is what keeps the two apart: this block is what CasaDash
+      # needs to run; .env.app is what an app receives. See docs/app-env.md.
       APPSTORE_URL: "https://github.com/Yundera/AppStore/archive/refs/heads/main.zip"
       # Apps the user must not uninstall from the dashboard (comma-separated store
       # ids, e.g. "casadash,casaos"). They still appear as tiles; only the

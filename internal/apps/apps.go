@@ -223,12 +223,12 @@ func (r *Registry) List(ctx context.Context) ([]App, error) {
 		var app App
 		if ps != nil {
 			si, ca := r.metaFor(name, ps.workingDir)
-			app = buildApp(name, si, ca, r.cfg.RefDomain, true, statusOf(ps.running, ps.total), ps.svcPorts)
+			app = buildApp(name, si, ca, r.cfg.AppDomain(), true, statusOf(ps.running, ps.total), ps.svcPorts)
 			app.Health = ps.health()
 		} else {
 			// Installed but down (or Docker didn't answer): greyed, stopped tile.
 			si, ca := r.metaFor(name, "")
-			app = buildApp(name, si, ca, r.cfg.RefDomain, true, StatusStopped, nil)
+			app = buildApp(name, si, ca, r.cfg.AppDomain(), true, StatusStopped, nil)
 		}
 		app.Busy = r.isBusy(name)
 		app.Protected = r.cfg.IsProtected(app.Store, name)
@@ -246,7 +246,7 @@ func (r *Registry) List(ctx context.Context) ([]App, error) {
 		if si == nil && ca == nil {
 			continue // a non-CasaDash stack without any recognised metadata: not ours.
 		}
-		app := buildApp(name, si, ca, r.cfg.RefDomain, false, statusOf(ps.running, ps.total), ps.svcPorts)
+		app := buildApp(name, si, ca, r.cfg.AppDomain(), false, statusOf(ps.running, ps.total), ps.svcPorts)
 		app.Health = ps.health()
 		app.Busy = r.isBusy(name)
 		app.Protected = r.cfg.IsProtected(app.Store, name)

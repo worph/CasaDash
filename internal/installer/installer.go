@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/yundera/casadash/internal/appenv"
 	"github.com/yundera/casadash/internal/apps"
 	"github.com/yundera/casadash/internal/appstore"
 	"github.com/yundera/casadash/internal/composefile"
@@ -251,14 +252,13 @@ func (in *Installer) Install(ctx context.Context, storeURL, id, fromBackup strin
 		return err
 	}
 
-	// Prefill the app's .env so its compose resolves offline and the operator can
-	// hand-edit variables afterwards (see docs/app-model.md). Never clobber an
-	// existing .env — a reinstall over a restored archive keeps the user's edits.
-	envPath := filepath.Join(appDir, ".env")
-	if _, err := os.Stat(envPath); os.IsNotExist(err) {
-		if err := os.WriteFile(envPath, envinject.EnvFile(in.cfg, project), 0o644); err != nil {
-			return err
-		}
+	// Prefill the app's .env from the deployment's .env.app (merged with the vars
+	// CasaDash computes per app), so its compose resolves offline and the operator
+	// can hand-edit it afterwards — see docs/app-model.md and internal/appenv.
+	// Keys are ensured one by one, so a reinstall over a restored archive refreshes
+	// what the deployment provides and keeps everything the user added.
+	if err := appenv.Sync(in.cfg, project, appDir); err != nil {
+		return err
 	}
 
 	// Record where this app came from so the per-app Update tab can pull a fresher

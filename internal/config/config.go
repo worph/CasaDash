@@ -25,12 +25,11 @@ type Config struct {
 	// to DataRoot when the container mount point equals the host path.
 	DataHostPath string
 
-	// PCS / store templating (see internal/envinject). Empty is fine for local use.
-	RefNet    string
-	RefPort   string
-	RefScheme string
-	RefDomain string
-	RefSep    string
+	// StateDirPath overrides where CasaDash keeps everything it owns (see StateDir).
+	// Empty means the default, ${DataRoot}/AppData/casadash. Set CASADASH_STATE_DIR
+	// to move it — e.g. onto a different volume, or out of AppData entirely so the
+	// dashboard's own folder is not also an app folder.
+	StateDirPath string
 
 	PUID string
 	PGID string
@@ -54,7 +53,37 @@ type Config struct {
 	// nil means the feature is unwired (a Config built outside the server), and no
 	// override is ever touched.
 	Domains func() []domains.Domain
+
+	// AppEnv returns the deployment's app-facing variables — the contents of
+	// .env.app (see internal/appenv), which CasaDash forwards into every app's .env.
+	// It is a function, not a map, for the same reason Domains is: the file belongs
+	// to the deployment and is edited while CasaDash runs, so reading it live is
+	// what lets a new domain or IP reach the next `docker compose up` without a
+	// restart.
+	//
+	// nil means the feature is unwired (a Config built outside the server); apps
+	// then get only the variables CasaDash computes for itself.
+	AppEnv func() map[string]string
 }
+
+// appEnv is AppEnv, tolerating a Config that never wired it.
+func (c Config) appEnv() map[string]string {
+	if c.AppEnv == nil {
+		return nil
+	}
+	return c.AppEnv()
+}
+
+// AppDomain is the deployment's base domain (.env.app's APP_DOMAIN). CasaDash uses
+// it for two things of its own: resolving an app's click-through URL
+// (xcomposeapp.WebURL) and recognising an app's gateway host in the dashboard's
+// host-based dispatch (server/gate.go). Empty when the deployment has no domain,
+// in which case apps simply have no reachable web address.
+func (c Config) AppDomain() string { return c.appEnv()["APP_DOMAIN"] }
+
+// AppNet is the external Docker network CasaDash attaches every app's main service
+// to (.env.app's APP_NET). Empty means no network is attached.
+func (c Config) AppNet() string { return c.appEnv()["APP_NET"] }
 
 // FromEnv builds a Config from environment variables with sensible defaults.
 func FromEnv() Config {
@@ -63,11 +92,7 @@ func FromEnv() Config {
 		Addr:         envOr("CASADASH_ADDR", ":8080"),
 		DataRoot:     dataRoot,
 		DataHostPath: envOr("DATA_HOST_PATH", dataRoot),
-		RefNet:       os.Getenv("REF_NET"),
-		RefPort:      os.Getenv("REF_PORT"),
-		RefScheme:    os.Getenv("REF_SCHEME"),
-		RefDomain:    os.Getenv("REF_DOMAIN"),
-		RefSep:       envOr("REF_SEPARATOR", "-"),
+		StateDirPath: os.Getenv("CASADASH_STATE_DIR"),
 		PUID:         envOr("PUID", "1000"),
 		PGID:         envOr("PGID", "1000"),
 		TZ:           os.Getenv("TZ"),
@@ -102,11 +127,27 @@ func (c Config) AppsDir() string {
 	return filepath.Join(c.DataRoot, "AppData")
 }
 
-// StateDir is where CasaDash's own state (settings, store cache) lives. It sits
-// under AppData with a dot-prefixed name so the app model's "a dot in the name
-// hides it" rule keeps it off the dashboard.
+// StateDir is where everything CasaDash owns lives: its settings, its store cache,
+// and the deployment's .env.app. It defaults to CasaDash's own app directory —
+// ${DataRoot}/AppData/casadash — the same folder a deployment installs the dashboard's
+// compose stack into, so there is one place to look for anything CasaDash, and no
+// hidden sibling.
+//
+// The default name carries no dot, so the app model's "a dot in the name hides it"
+// rule does NOT hide it: when a deployment puts a docker-compose.yml here, CasaDash
+// tiles itself, which is intended. On a standalone install there is no compose file
+// here and the folder holds state alone — isManaged requires a docker-compose.yml, so
+// it stays off the dashboard rather than rendering an empty tile.
+//
+// CASADASH_STATE_DIR overrides it. It is a path INSIDE this container, like DataRoot:
+// point it outside AppData and the state stops sharing a folder with an app; point it
+// at another volume and it moves off the data disk entirely. A deployment that sets it
+// must put .env.app there too — that is where CasaDash will look.
 func (c Config) StateDir() string {
-	return filepath.Join(c.DataRoot, "AppData", ".casadash")
+	if c.StateDirPath != "" {
+		return c.StateDirPath
+	}
+	return filepath.Join(c.DataRoot, "AppData", "casadash")
 }
 
 func envOr(key, def string) string {

@@ -20,7 +20,7 @@ generates the extra routes for every app.
 ## The domain list
 
 ```jsonc
-// <DATA_ROOT>/AppData/.casadash/settings.json
+// <DATA_ROOT>/AppData/casadash/settings.json
 "domains": [
   { "name": "nip",   "domain": "${APP_PUBLIC_IP_DASH}.nip.io",
     "directives": { "import": "gateway_tls" } },

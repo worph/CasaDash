@@ -38,6 +38,45 @@ name: casadash-dev
 
 services:
   # ---------------------------------------------------------------------------
+  # .env.app — what every installed app receives (prod: written by the PCS
+  # orchestrator at provisioning; here, by this init container at `up`).
+  #
+  # CasaDash creates a default .env.app if none exists, but that default is a
+  # standalone local install (network `mesh`, no domain). This stack is the
+  # prod-shaped one — apps on the `pcs` network, fronted by caddy over https — so
+  # the deployment states that itself, which is precisely the separation: CasaDash
+  # never invents the deployment's identity, it forwards it.
+  #
+  # Rewritten on every `up`, so changing DOMAIN/PUBLIC_IP in .env.dev reaches every
+  # app on its next start. See docs/app-env.md.
+  # ---------------------------------------------------------------------------
+  appenv:
+    image: busybox:1.37
+    volumes:
+      - type: bind
+        source: ${DATA_HOST_PATH:-/DATA}
+        target: /DATA
+    command:
+      - sh
+      - -c
+      - |
+        mkdir -p /DATA/AppData/casadash
+        cat > /DATA/AppData/casadash/.env.app <<'EOF'
+        # Written by dev/docker-compose.yml — edit .env.dev, not this file.
+        APP_NET=pcs
+        APP_DOMAIN=${DOMAIN}
+        domain=${DOMAIN}
+        APP_PUBLIC_IP=${PUBLIC_IP}
+        APP_PUBLIC_IP_DASH=${PUBLIC_IP_DASH}
+        APP_PUBLIC_IPV4=${PUBLIC_IP}
+        APP_PUBLIC_IPV4_DASH=${PUBLIC_IP_DASH}
+        APP_EMAIL=${EMAIL:-test@casadash.local}
+        APP_DEFAULT_PASSWORD=${DEFAULT_PWD:-casadash}
+        DefaultUserName=admin
+        DefaultPassword=${DEFAULT_PWD:-casadash}
+        EOF
+
+  # ---------------------------------------------------------------------------
   # CasaDash dashboard (prod `casaos` stand-in)
   # ---------------------------------------------------------------------------
   casadash:
@@ -57,37 +96,13 @@ services:
       # Store ids the user cannot uninstall from the dashboard (comma-separated).
       PROTECTED_APPS: "${PROTECTED_APPS:-}"
 
-      # --- Reverse-proxy reference (how CasaDash builds each app's URL) --------
-      # Match prod: apps are attached to `pcs` and fronted by caddy over https.
-      REF_NET: "pcs"
-      REF_PORT: "443"
-      REF_SCHEME: "https"
-      REF_DOMAIN: "${DOMAIN}"
-
-      # --- Interpolation vars forwarded to installed apps ---------------------
-      # CasaDash passes its whole environment to `docker compose` when installing
-      # a store app (see internal/envinject/envinject.go), so anything set here is
-      # available to that app's ${VAR} label/env interpolation — same contract as
-      # casa-img. SSO apps' caddy_* labels + OIDC config resolve against these.
-      DOMAIN: "${DOMAIN}"
-      # lowercase alias: store apps' x-compose-app webui-host uses ${domain}
-      # (casa-img sets this too). Silences compose's "domain not set" warning.
-      domain: "${DOMAIN}"
-      PUBLIC_IP: "${PUBLIC_IP}"
-      PUBLIC_IP_DASH: "${PUBLIC_IP_DASH}"
-      PUBLIC_IPV4: "${PUBLIC_IP}"
-      PUBLIC_IPV4_DASH: "${PUBLIC_IP_DASH}"
-      DEFAULT_PWD: "${DEFAULT_PWD:-casadash}"
-      EMAIL: "${EMAIL:-test@casadash.local}"
-      APP_DOMAIN: "${DOMAIN}"
-      APP_DATA_ROOT: "/DATA"
-      APP_NET: "pcs"
-      APP_PUBLIC_IP: "${PUBLIC_IP}"
-      APP_PUBLIC_IP_DASH: "${PUBLIC_IP_DASH}"
-      APP_PUBLIC_IPV4: "${PUBLIC_IP}"
-      APP_PUBLIC_IPV4_DASH: "${PUBLIC_IP_DASH}"
-      APP_EMAIL: "${EMAIL:-test@casadash.local}"
-      APP_DEFAULT_PASSWORD: "${DEFAULT_PWD:-casadash}"
+      # NOTE: what an app *receives* is not set here — it is written to .env.app by
+      # the `appenv` service below, exactly as a Yundera PCS orchestrator writes it
+      # at provisioning. This block is only what CasaDash needs to run itself.
+      # See docs/app-env.md.
+    depends_on:
+      appenv:
+        condition: service_completed_successfully
     group_add:
       - "${DOCKER_GID:-999}"
     networks:

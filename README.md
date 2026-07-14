@@ -35,6 +35,7 @@ container**. Two env vars keep that straight:
 |-----|---------|---------|
 | `DATA_ROOT` | Where the data folder is mounted **inside** the container. CasaDash reads and writes its own files here. | `/DATA` |
 | `DATA_HOST_PATH` | The **host** path of that same folder. Written into every installed app's compose, so the host daemon binds the right directory. | = `DATA_ROOT` |
+| `CASADASH_STATE_DIR` | Where everything CasaDash owns lives — settings, store cache, and the deployment's [`.env.app`](./docs/app-env.md). An in-container path, like `DATA_ROOT`. Move it to keep CasaDash's state out of a folder that is also an app folder, or onto another volume. | `${DATA_ROOT}/AppData/casadash` |
 
 Set `DATA_HOST_PATH` to wherever the data folder really lives on the host, and bind that
 same host path to `/DATA`:
@@ -199,7 +200,7 @@ widget visibility, and the **app-store source URLs** (multi-store).
 - **Source:** a GitHub zip of Compose listings, identical to `casa-img`'s:
   `https://github.com/Yundera/AppStore/archive/refs/heads/main.zip`. Set `APPSTORE_URL` to
   a **comma-separated** list for multiple stores. Catalogs are cached under
-  `${DATA_ROOT}/AppData/.casadash/appstore` and refreshed hourly.
+  `${DATA_ROOT}/AppData/casadash/appstore` and refreshed hourly.
 - **App format:** standard `docker-compose.yml` + the CasaOS **`x-casaos`** block (title,
   icon, tagline, category, screenshots, main port/scheme/path). Read and honoured
   unchanged.
@@ -385,8 +386,11 @@ networks:
   installed and run. Mounting it is equivalent to root on the host; run CasaDash only on
   hosts you trust it on. `DOCKER_GID` must match `stat -c '%g' /var/run/docker.sock`.
 - **`/DATA`** (bind, `rshared`) holds app data and the compose projects CasaDash writes.
-- **State** lives at `${DATA_ROOT}/AppData/.casadash/` (settings, store cache) — the
-  leading dot is what keeps it off the dashboard, per the app model's hidden-name rule.
+- **State** lives at `${DATA_ROOT}/AppData/casadash/` — settings, store cache, and the
+  deployment's [`.env.app`](./docs/app-env.md). It is CasaDash's own app directory, so
+  everything CasaDash owns is in one place. It holds no `docker-compose.yml` on a
+  standalone install and therefore renders no tile; a deployment that installs the
+  dashboard's own compose stack here gets a CasaDash tile, which is intended.
 - **Uninstall never deletes.** The app folder is **renamed** to `<app>.<date>.archive`
   (or zipped, on request); the data stays put.
 - **Health:** `GET /ping` → 200.
