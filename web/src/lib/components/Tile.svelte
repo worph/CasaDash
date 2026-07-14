@@ -115,7 +115,9 @@
           <button onclick={() => act('restart')}>{$t('restart')}</button>
           <button onclick={() => act('stop')}>{$t('stop')}</button>
         {/if}
-        <button class="danger" onclick={remove}>{$t('uninstall')}</button>
+        {#if !tile.app.protected}
+          <button class="danger" onclick={remove}>{$t('uninstall')}</button>
+        {/if}
       {:else if tile.kind === 'link'}
         <button class="danger" onclick={remove}>{$t('remove')}</button>
       {/if}
@@ -193,7 +195,6 @@
     display: grid;
     place-items: center;
     overflow: hidden;
-    background: var(--casablue);
     color: #fff;
   }
   .icon img {
@@ -305,7 +306,15 @@
     opacity: 0.4;
     cursor: not-allowed;
   }
+  /* No-icon fallback: the blue plate lives on the letter, not on .icon, so real
+     icons render against the tile with no backdrop. */
   .letter {
+    width: 100%;
+    height: 100%;
+    display: grid;
+    place-items: center;
+    border-radius: var(--radius-icon);
+    background: var(--casablue);
     font-size: 2rem;
     font-weight: 600;
   }

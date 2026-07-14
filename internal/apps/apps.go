@@ -6,6 +6,7 @@ package apps
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/url"
@@ -53,6 +54,10 @@ type App struct {
 	// "unhealthy", "starting", or "" when no container declares a health check.
 	// Drives the tile's top-left status dot (green/orange).
 	Health string `json:"health,omitempty"`
+	// Protected marks an app the operator pinned via PROTECTED_APPS (matched on
+	// store id, e.g. "casadash"): it shows as a normal tile but its Uninstall
+	// entry is hidden and the DELETE endpoint refuses it.
+	Protected bool `json:"protected,omitempty"`
 	// Busy is set while a lifecycle operation (start/stop/restart/uninstall) is
 	// in flight for this app. The tile then shows a "…" overlay and hides its
 	// burger menu until the operation settles.
@@ -226,6 +231,7 @@ func (r *Registry) List(ctx context.Context) ([]App, error) {
 			app = buildApp(name, si, ca, r.cfg.RefDomain, true, StatusStopped, nil)
 		}
 		app.Busy = r.isBusy(name)
+		app.Protected = r.cfg.IsProtected(app.Store, name)
 		out = append(out, app)
 		seen[name] = true
 	}
@@ -243,6 +249,7 @@ func (r *Registry) List(ctx context.Context) ([]App, error) {
 		app := buildApp(name, si, ca, r.cfg.RefDomain, false, statusOf(ps.running, ps.total), ps.svcPorts)
 		app.Health = ps.health()
 		app.Busy = r.isBusy(name)
+		app.Protected = r.cfg.IsProtected(app.Store, name)
 		out = append(out, app)
 		seen[name] = true
 	}
@@ -551,6 +558,24 @@ func (r *Registry) Restart(ctx context.Context, id string) error {
 	return r.dx.RestartProject(ctx, id)
 }
 
+// ErrProtected is returned when an uninstall targets an app the operator listed
+// in PROTECTED_APPS (see config.Config.IsProtected).
+var ErrProtected = errors.New("this app is protected and cannot be uninstalled")
+
+// Protected reports whether the app is exempt from uninstall, resolving its store
+// id from its compose metadata (falling back to the project name).
+func (r *Registry) Protected(id string) bool {
+	storeID := ""
+	si, ca := r.metaFor(id, "")
+	if si != nil {
+		storeID = si.StoreAppID
+	}
+	if ca != nil && ca.ID != "" {
+		storeID = ca.ID
+	}
+	return r.cfg.IsProtected(storeID, id)
+}
+
 // Uninstall stops+removes the project's containers and archives its app
 // directory. CasaDash never deletes user data: the whole ${DATA_ROOT}/AppData/<id>
 // folder (compose + override + .env + data) is renamed to
@@ -559,6 +584,9 @@ func (r *Registry) Restart(ctx context.Context, id string) error {
 // hides it from the dashboard. Returns the archive's base name (empty when there
 // was nothing on disk to archive, e.g. an unmanaged stack).
 func (r *Registry) Uninstall(ctx context.Context, id string, zip bool) (string, error) {
+	if r.Protected(id) {
+		return "", ErrProtected
+	}
 	r.enter(id)
 	defer r.leave(id)
 

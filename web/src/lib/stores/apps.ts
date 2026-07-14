@@ -19,6 +19,9 @@ export interface App {
   /** Aggregated Docker health-check verdict; drives the tile status dot.
    *  Absent when no container declares a health check. */
   health?: 'healthy' | 'unhealthy' | 'starting'
+  /** Pinned by the operator (PROTECTED_APPS): the tile hides its Uninstall
+   *  entry, and the backend refuses a DELETE for it. */
+  protected?: boolean
   /** True while a lifecycle op (start/stop/restart/uninstall) is in flight:
    *  the tile shows a "…" overlay and hides its burger menu. */
   busy?: boolean

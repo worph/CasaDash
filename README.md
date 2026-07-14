@@ -373,6 +373,7 @@ networks:
 | `DATA_ROOT` | `/DATA` | Data folder inside the container. |
 | `DATA_HOST_PATH` | = `DATA_ROOT` | That folder's path on the host. |
 | `APPSTORE_URL` | Yundera AppStore zip | Store source(s), comma-separated. |
+| `PROTECTED_APPS` | — | Store ids the user cannot uninstall (e.g. `casadash,casaos`), comma-separated. The tiles still show; only Uninstall is withheld — in the menu and in the API. |
 | `PUID` / `PGID` | `1000` | Ownership applied to app folders. |
 | `TZ` | — | Timezone for the dashboard and installed apps. |
 | `REF_NET`, `REF_PORT`, `REF_SCHEME`, `REF_DOMAIN`, `REF_SEPARATOR` | — / `-` | Store templating: app network + `{app}{sep}{domain}` hostnames. |

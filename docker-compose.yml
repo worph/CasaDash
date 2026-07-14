@@ -24,6 +24,10 @@ services:
       REF_SCHEME: "http"
       REF_DOMAIN: "${DOMAIN:-}"
       APPSTORE_URL: "https://github.com/Yundera/AppStore/archive/refs/heads/main.zip"
+      # Apps the user must not uninstall from the dashboard (comma-separated store
+      # ids, e.g. "casadash,casaos"). They still appear as tiles; only the
+      # Uninstall action is withheld — and the API refuses it too.
+      PROTECTED_APPS: "${PROTECTED_APPS:-}"
     # The Docker socket is root-owned here; grant the group so a non-root process
     # could reach it. On most hosts the socket is in the "docker" group.
     group_add:

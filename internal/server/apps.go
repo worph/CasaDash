@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"time"
 
@@ -114,6 +115,10 @@ func (s *Server) handleUninstallApp(w http.ResponseWriter, r *http.Request) {
 	// Either way the app's data is preserved (docs/app-model.md).
 	zip := r.URL.Query().Get("zip") == "true"
 	archiveName, err := s.apps.Uninstall(r.Context(), id, zip)
+	if errors.Is(err, apps.ErrProtected) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		return
+	}
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
