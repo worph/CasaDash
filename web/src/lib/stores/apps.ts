@@ -323,16 +323,26 @@ export function appUrl(a: App): string {
   return ''
 }
 
-/** Open an app's web UI, or warn if it has no reachable URL. */
+/** Open an app, or warn if it has no reachable URL.
+ *
+ *  Optimistic routing (matching CasaOS): an app the tile already shows as cleanly
+ *  running goes STRAIGHT to its URL — no interstitial, so the nominal case has no
+ *  flash. Only an app that isn't cleanly up (stopped, partial, still health-check
+ *  "starting", or unhealthy) goes through `/launch?app=<id>`, which starts the
+ *  stack if needed and holds a friendly status page until it responds — instead of
+ *  a browser connection error or a gateway 502. Both paths open synchronously in
+ *  the click handler so the popup blocker stays clear. */
 export function openApp(a: App): void {
   const url = appUrl(a)
-  if (url) {
-    window.open(url, '_blank', 'noopener')
-  } else {
+  if (url === '') {
     alert(
       `${a.name} has no directly reachable web address.\n\n` +
         `It exposes its UI to a reverse-proxy/gateway rather than a host port. ` +
         `Add a published port via the app's Settings → override, or put it behind a gateway.`,
     )
+    return
   }
+  const cleanlyUp = a.status === 'running' && a.health !== 'starting' && a.health !== 'unhealthy'
+  const target = cleanlyUp ? url : `/launch?app=${encodeURIComponent(a.id)}`
+  window.open(target, '_blank', 'noopener')
 }

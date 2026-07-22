@@ -70,3 +70,27 @@ export async function saveDomains(list: Domain[]): Promise<void> {
 }
 
 export const wallpaper = derived(settings, ($s) => $s.wallpaper)
+
+/**
+ * The deployment's .env.app — the variables CasaDash forwards into every app.
+ *
+ * It travels as text, not as a key/value list: the file's comments are its
+ * documentation and its empty values are meaningful ("the deployment does not have
+ * this"), so a round-trip through a map would destroy most of it. `ignored` names
+ * the keys the text sets that CasaDash computes per app anyway and will overwrite.
+ */
+export interface AppEnvFile {
+  text: string
+  ignored?: string[]
+}
+
+export const loadAppEnv = () => api.get<AppEnvFile>('/api/settings/appenv')
+
+/**
+ * Replace .env.app. Rejects (400) rather than saving text CasaDash would read back
+ * differently — a line that isn't KEY=VALUE, a bad name, a duplicate key.
+ *
+ * Nothing restarts: unlike domains, which rewrite Caddy labels, these variables are
+ * ensured into each app's own .env on its next start. The editor says so.
+ */
+export const saveAppEnv = (text: string) => api.put<AppEnvFile>('/api/settings/appenv', { text })

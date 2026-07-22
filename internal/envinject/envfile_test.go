@@ -2,7 +2,11 @@ package envinject
 
 import (
 	"reflect"
+	"slices"
+	"strings"
 	"testing"
+
+	"github.com/yundera/casadash/internal/config"
 )
 
 func TestParseEnvFile(t *testing.T) {
@@ -71,5 +75,70 @@ func TestPatchEnvFileValueRoundTrip(t *testing.T) {
 	}
 	if back := ParseEnvFile(got); !reflect.DeepEqual(back, vars) {
 		t.Fatalf("round-trip = %#v, want %#v", back, vars)
+	}
+}
+
+// ValidateEnvFile is what stands between a raw editor and a file the apps on the
+// box depend on, so it must reject anything ParseEnvFile would quietly drop or
+// resolve differently — while leaving comments, blanks and empty values alone.
+func TestValidateEnvFile(t *testing.T) {
+	for name, tc := range map[string]struct {
+		raw  string
+		want string // substring of the expected error; "" = must pass
+	}{
+		"comments blanks and empty values": {
+			raw: "# a note\n\nAPP_DOMAIN=\nAPP_NET=mesh\n",
+		},
+		"no trailing newline": {
+			raw: "APP_NET=mesh",
+		},
+		"line that is not an entry": {
+			// The typo that motivates the whole check: ParseEnvFile skips this
+			// line, so without it the save would "succeed" and change nothing.
+			raw:  "APP_NET=mesh\nAPP_DOMAIN example.com\n",
+			want: "line 2",
+		},
+		"invalid key": {
+			raw:  "1BAD=x\n",
+			want: "invalid variable name",
+		},
+		"duplicate key": {
+			// ParseEnvFile takes the last value, so the first would vanish.
+			raw:  "APP_NET=mesh\nAPP_NET=pcs\n",
+			want: "duplicate",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := ValidateEnvFile([]byte(tc.raw))
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("ValidateEnvFile() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("ValidateEnvFile() = nil, want an error mentioning %q", tc.want)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("ValidateEnvFile() = %v, want it to mention %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// DerivedKeys reads its names off BaseVars so the two cannot drift.
+func TestDerivedKeysTracksBaseVars(t *testing.T) {
+	got := DerivedKeys()
+	base := BaseVars(config.Config{}, "psitransfer")
+	if len(got) != len(base) {
+		t.Fatalf("DerivedKeys() = %v (%d keys), want the %d BaseVars computes", got, len(got), len(base))
+	}
+	for _, k := range got {
+		if _, ok := base[k]; !ok {
+			t.Errorf("DerivedKeys() reports %q, which BaseVars does not compute", k)
+		}
+	}
+	if !slices.IsSorted(got) {
+		t.Errorf("DerivedKeys() = %v, want sorted", got)
 	}
 }

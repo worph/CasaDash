@@ -44,7 +44,6 @@
   "store": "Store",
   "back": "Back",
   "cancel": "Cancel",
-  "add": "Add",
   "loading": "Loading…",
   "unlisted_store": "This app comes from a store you have not added:",
   "unlisted_store_hint": "Only install it if you trust that source.",
@@ -52,5 +51,16 @@
   "restore_from_backup": "Restore from backup",
   "restore_from_backup_hint": "Reinstalls the app on top of that backup's data and .env.",
   "backup_zip": "zip",
-  "backup_folder": "folder"
+  "backup_folder": "folder",
+  "more": "More",
+  "domains_empty": "No extra domains yet.",
+  "app_env": "App environment",
+  "app_env_hint": "The variables CasaDash passes into every app it installs — the domain, the network, the identity apps are seeded with. The comments in the file explain each one. An empty value means \"not set\": the key is skipped rather than passed on blank.",
+  "app_env_path": "AppData/casadash/.env.app",
+  "app_env_owner": "This file belongs to the deployment, not to CasaDash. On a Yundera PCS the orchestrator writes it and may overwrite your changes.",
+  "app_env_applies": "Saved changes reach each app the next time it starts. Nothing is restarted here.",
+  "app_env_ignored": "CasaDash sets these itself, per app — the values here have no effect:",
+  "save": "Save",
+  "saved": "Saved",
+  "revert": "Revert"
 }

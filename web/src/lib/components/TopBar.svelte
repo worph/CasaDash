@@ -2,9 +2,18 @@
   import { clickOutside } from '../actions'
   import { settings } from '../stores/settings'
   import { t, languages } from '../i18n'
-  import DomainsField from './DomainsField.svelte'
+  import { openSettings } from '../route'
 
   let open = $state(false)
+
+  // Language, wallpaper and widgets stay here rather than moving to the settings
+  // page: they are instant and previewed against the dashboard behind them, and
+  // sending someone to a full-screen page to pick a wallpaper they can no longer
+  // see would be worse. Anything that configures the box itself lives on the page.
+  function more() {
+    open = false
+    openSettings()
+  }
 
   const wallpapers = [
     '/wallpapers/default_wallpaper.jpg',
@@ -66,7 +75,12 @@
             </div>
           </div>
 
-          <DomainsField />
+          <button class="more" onclick={more}>
+            <span>{$t('more')}</span>
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M9 6l6 6-6 6" />
+            </svg>
+          </button>
         </div>
       {/if}
     </div>
@@ -179,5 +193,27 @@
     gap: 0.5rem;
     color: var(--grey-800);
     font-size: 0.85rem;
+  }
+  /* Way out of the dropdown, into the settings page. */
+  .more {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    margin-top: -0.25rem;
+    padding: 0.5rem 0.5rem;
+    border: none;
+    border-top: 1px solid hsla(208, 16%, 90%, 1);
+    border-radius: 0 0 6px 6px;
+    background: transparent;
+    color: var(--grey-800);
+    font-size: 0.85rem;
+    cursor: pointer;
+  }
+  .more:hover {
+    background: rgba(0, 0, 0, 0.04);
+  }
+  .more svg {
+    color: var(--grey-600);
   }
 </style>

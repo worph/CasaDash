@@ -108,6 +108,7 @@ func New(cfg config.Config, uiFS fs.FS) http.Handler {
 		r.Get("/apps/{id}/update", s.handleCheckUpdate)
 		r.Post("/apps/{id}/update", s.handleApplyUpdate)
 		r.Get("/apps/{id}/services", s.handleAppServices)
+		r.Get("/apps/{id}/reachable", s.handleReachable)
 		r.Get("/apps/{id}/logs", s.handleAppLogs)
 		r.Get("/apps/{id}/stats", s.handleAppStats)
 		r.Post("/apps/{id}/{action}", s.handleAppAction)
@@ -125,7 +126,15 @@ func New(cfg config.Config, uiFS fs.FS) http.Handler {
 		r.Get("/settings", s.handleGetSettings)
 		r.Put("/settings", s.handlePutSettings)
 		r.Put("/settings/domains", s.handlePutDomains)
+		r.Get("/settings/appenv", s.handleGetAppEnv)
+		r.Put("/settings/appenv", s.handlePutAppEnv)
 	})
+
+	// The launch page (see launch.go) is served on the dashboard origin: a tile
+	// click for a port-published app opens /launch?app=<id>, which holds the user
+	// through start/readiness instead of a browser error page. Registered before
+	// the SPA catch-all so it wins.
+	r.Get("/launch", s.handleLaunch)
 
 	r.Handle("/*", spaHandler(uiFS))
 

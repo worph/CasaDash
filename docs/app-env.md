@@ -84,6 +84,36 @@ without the dashboard in the loop.
 Add a line to `.env.app`. That is the whole procedure — no rebuild, no code change.
 It reaches every app on its next start.
 
+## Editing it from the dashboard
+
+**Settings › App environment** edits this file, for a deployment where opening a shell
+is not the natural move. It is the file itself in a text box, not a form: the comments
+are the documentation, there is no fixed schema — a deployment adds its own keys — and
+an empty value means something a form field cannot express.
+
+Three things the page is careful about, all of them consequences of the above:
+
+- **It says the file has another owner.** On a PCS the orchestrator wrote it and may
+  write it again, over your edit. CasaDash cannot prevent that and does not pretend to.
+- **It saves nothing it cannot read back.** A line that is not `KEY=VALUE`, a name that
+  is not a shell identifier, a duplicated key — all rejected, with the line number, and
+  the file on disk is left untouched. The parser is deliberately forgiving (it skips a
+  line it cannot read); a save is not, because a typo that silently does nothing would
+  surface days later as an app that will not start.
+- **It restarts nothing.** The variables land in each app's `.env` on that app's next
+  start, per the section above. Unlike the domains list — which rewrites Caddy labels
+  and so *must* recreate containers to mean anything — there is nothing here that
+  recreating every container on the box would buy.
+
+A key CasaDash computes per app (`AppID`, `PUID`, `PGID`, `TZ`, `DATA_ROOT`,
+`DATA_HOST_PATH`) is reported as having no effect rather than rejected: the file is the
+deployment's, and it is free to say what it likes.
+
+Note the file holds `APP_DEFAULT_PASSWORD` and `DefaultPassword` in plain text, so the
+page shows credentials. It was always a readable file on a box with no auth (CasaDash
+assumes a trusted network — see the README); the page does not change who can read it,
+only how far they have to reach.
+
 ## The default
 
 ```sh

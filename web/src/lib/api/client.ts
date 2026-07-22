@@ -6,13 +6,32 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
     headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
     body: body !== undefined ? JSON.stringify(body) : undefined,
   })
-  if (!res.ok) {
-    const text = await res.text().catch(() => '')
-    throw new Error(`${method} ${path} -> ${res.status} ${text}`)
-  }
+  if (!res.ok) throw await apiError(method, path, res)
   if (res.status === 204) return undefined as T
   const ct = res.headers.get('content-type') ?? ''
   return (ct.includes('application/json') ? await res.json() : await res.text()) as T
+}
+
+/**
+ * The error to throw for a failed response.
+ *
+ * The API answers a failure with `{"error": "<message>"}`, and those messages are
+ * written for the operator to read ("line 3: … is not KEY=VALUE"). Callers put
+ * `e.message` straight on screen, so surface that alone rather than wrapping it in
+ * the request line — which is for the console, not the user.
+ *
+ * Anything without such a message — a proxy's HTML error page, an empty body — has
+ * nothing to show, so there we name the request that failed instead.
+ */
+async function apiError(method: string, path: string, res: Response): Promise<Error> {
+  const text = await res.text().catch(() => '')
+  let msg = ''
+  try {
+    msg = (JSON.parse(text) as { error?: string })?.error ?? ''
+  } catch {
+    /* not JSON — fall through */
+  }
+  return new Error(msg || `${method} ${path} -> ${res.status} ${text}`.trim())
 }
 
 export const api = {

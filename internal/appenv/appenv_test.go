@@ -182,3 +182,87 @@ func TestSyncCreatesEnvForAFreshInstall(t *testing.T) {
 		t.Errorf("fresh .env not prefilled: %v", got)
 	}
 }
+
+// The editor round-trips the file as text, so what it reads back must be the file
+// byte for byte — comments, ordering and empty values included. Load's map keeps
+// none of those (it drops empties entirely), which is why ReadRaw exists.
+func TestReadRawIsVerbatim(t *testing.T) {
+	const file = "# the deployment's note\n\nAPP_NET=pcs\nAPP_DOMAIN=\n"
+	cfg := newCfg(t, file)
+
+	got, err := ReadRaw(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != file {
+		t.Errorf("ReadRaw() =\n%s\nwant\n%s", got, file)
+	}
+}
+
+// A deployment that has not been through Ensure yet still opens the editor on the
+// documented default rather than an error or a blank page.
+func TestReadRawFallsBackToTheDefault(t *testing.T) {
+	cfg := config.Config{DataRoot: t.TempDir()}
+
+	got, err := ReadRaw(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "APP_NET=mesh") {
+		t.Errorf("ReadRaw() on a fresh deployment should be the shipped default, got:\n%s", got)
+	}
+}
+
+// WriteRaw is the editor's save: it overwrites (unlike Ensure), and what it writes
+// is what Load must then read.
+func TestWriteRawReplacesAndLoads(t *testing.T) {
+	cfg := newCfg(t, "APP_NET=mesh\n")
+
+	if err := WriteRaw(cfg, []byte("# edited\nAPP_NET=pcs\nAPP_DOMAIN=example.com\n")); err != nil {
+		t.Fatal(err)
+	}
+	if v := Load(cfg)["APP_NET"]; v != "pcs" {
+		t.Errorf("APP_NET = %q, want pcs", v)
+	}
+	if v := Load(cfg)["APP_DOMAIN"]; v != "example.com" {
+		t.Errorf("APP_DOMAIN = %q, want example.com", v)
+	}
+	raw, err := ReadRaw(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(raw), "# edited\n") {
+		t.Errorf("the operator's comment must survive the save:\n%s", raw)
+	}
+}
+
+// A typo must not cost the operator their working file: the save is rejected and
+// the file on disk is left exactly as it was.
+func TestWriteRawRejectsBadTextWithoutTouchingTheFile(t *testing.T) {
+	const before = "APP_NET=mesh\n"
+	cfg := newCfg(t, before)
+
+	if err := WriteRaw(cfg, []byte("APP_NET=mesh\nAPP_DOMAIN example.com\n")); err == nil {
+		t.Fatal("WriteRaw() = nil, want an error for a line that is not KEY=VALUE")
+	}
+	raw, err := ReadRaw(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != before {
+		t.Errorf("a rejected save must leave the file alone, got:\n%s", raw)
+	}
+}
+
+// WriteRaw creates the file (and its directory) for a deployment that never had
+// one — the editor is reachable before Ensure has ever run.
+func TestWriteRawCreatesTheFile(t *testing.T) {
+	cfg := config.Config{DataRoot: t.TempDir()}
+
+	if err := WriteRaw(cfg, []byte("APP_NET=pcs\n")); err != nil {
+		t.Fatal(err)
+	}
+	if v := Load(cfg)["APP_NET"]; v != "pcs" {
+		t.Errorf("APP_NET = %q, want pcs", v)
+	}
+}

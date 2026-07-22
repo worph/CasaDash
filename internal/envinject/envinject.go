@@ -44,6 +44,22 @@ func BaseVars(cfg config.Config, appID string) map[string]string {
 	}
 }
 
+// DerivedKeys names the variables BaseVars computes — the ones CasaDash merges in
+// after the deployment's .env.app, and which therefore cannot be stated there.
+//
+// It reads the names off BaseVars rather than listing them again, so the two can
+// never drift: a variable added to BaseVars is reported as derived from that moment.
+// The .env.app editor uses this to tell an operator that a key they typed will be
+// overwritten, instead of letting them set a value that silently has no effect.
+func DerivedKeys() []string {
+	out := make([]string, 0, 6)
+	for k := range BaseVars(config.Config{}, "") {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // EnsureVars ensures each of vars in an app's .env, key by key.
 //
 // A key already in the file is set to its current value, in the line it already

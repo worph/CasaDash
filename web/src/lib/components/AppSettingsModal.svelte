@@ -24,8 +24,15 @@
     id,
     name,
     managed,
+    initialTab,
     onclose,
-  }: { id: string; name: string; managed: boolean; onclose: () => void } = $props()
+  }: {
+    id: string
+    name: string
+    managed: boolean
+    initialTab?: string
+    onclose: () => void
+  } = $props()
 
   // Managed apps get the config-editing pages (incl. editable Tips, saved into
   // the override); every app gets logs + stats.
@@ -45,7 +52,18 @@
     logs: 'Logs',
     stats: 'Stats',
   }
-  let tab = $state<Tab>(managed ? 'tips' : 'logs')
+  // Open on the deep-linked tab when one was requested and it exists for this app
+  // (managed apps have the config tabs; every app has logs + stats); otherwise the
+  // default first tab.
+  function firstTab(): Tab {
+    const wanted = initialTab as Tab | undefined
+    const available: Tab[] = managed
+      ? ['tips', 'webui', 'env', 'compose', 'override', 'update', 'logs', 'stats']
+      : ['logs', 'stats']
+    if (wanted && available.includes(wanted)) return wanted
+    return managed ? 'tips' : 'logs'
+  }
+  let tab = $state<Tab>(firstTab())
 
   // Two tabs, two views each, split by what you can do to them:
   //   Override — Form | YAML,      both editable, both the same override file.

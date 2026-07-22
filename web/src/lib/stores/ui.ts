@@ -8,8 +8,24 @@ export const storeOpen = writable(false)
 // empty means "whichever store the merged catalog resolves the id to". See lib/route.ts.
 export const storeApp = writable<{ store: string; app: string } | null>(null)
 
-// The app whose Settings modal is open (null = closed).
-export const settingsApp = writable<{ id: string; name: string; managed: boolean } | null>(null)
+// Whether the (box-wide) settings page is open, and which of its sections is
+// showing. Both are driven by lib/route.ts — the page is deep-linkable at
+// /settings/<section> — so set them by calling openSettings(), not directly.
+//
+// `settingsSection` is typed as a plain string rather than route.ts's
+// SettingsSection: route.ts imports this module, and importing its type back would
+// make the cycle a real one. SettingsPage does the narrowing.
+export const settingsOpen = writable(false)
+export const settingsSection = writable<string>('domain')
+
+// The app whose Settings modal is open (null = closed). `tab` optionally selects
+// which panel opens first — set by the launch page's deep-links (?panel=logs).
+export const settingsApp = writable<{
+  id: string
+  name: string
+  managed: boolean
+  tab?: string
+} | null>(null)
 
 // The app whose rendered-Tips modal is open (null = closed).
 export const tipsApp = writable<{ id: string; name: string } | null>(null)

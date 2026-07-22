@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"slices"
 	"strings"
 
+	"github.com/yundera/casadash/internal/appenv"
 	"github.com/yundera/casadash/internal/domains"
+	"github.com/yundera/casadash/internal/envinject"
 	"github.com/yundera/casadash/internal/usersettings"
 )
 
@@ -60,4 +63,63 @@ func (s *Server) handlePutDomains(w http.ResponseWriter, r *http.Request) {
 		go s.apps.Republish(context.Background())
 	}
 	writeJSON(w, http.StatusOK, s.settings.Get().Domains)
+}
+
+// appEnvBody is the .env.app editor's payload.
+//
+// The file moves as text, not as a key/value list like an app's own .env
+// (handlePutEnv): .env.app's comments are its documentation, and its empty values
+// are meaningful, so a round-trip through a map would quietly destroy most of the
+// file. See internal/appenv.
+type appEnvBody struct {
+	Text string `json:"text"`
+	// Ignored are keys the text sets that CasaDash computes per app anyway
+	// (envinject.DerivedKeys) and will overwrite. Reported rather than rejected —
+	// the file is the deployment's, and a PCS may well list them for its own
+	// reasons; the editor just says they have no effect.
+	Ignored []string `json:"ignored"`
+}
+
+// newAppEnvBody pairs .env.app's text with the derived keys it sets.
+func newAppEnvBody(raw []byte) appEnvBody {
+	derived := envinject.DerivedKeys()
+	var ignored []string
+	for _, v := range envinject.ParseEnvFile(raw) {
+		if slices.Contains(derived, v.Key) {
+			ignored = append(ignored, v.Key)
+		}
+	}
+	return appEnvBody{Text: string(raw), Ignored: ignored}
+}
+
+// handleGetAppEnv returns the deployment's .env.app as text.
+func (s *Server) handleGetAppEnv(w http.ResponseWriter, _ *http.Request) {
+	raw, err := appenv.ReadRaw(s.cfg)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, newAppEnvBody(raw))
+}
+
+// handlePutAppEnv replaces the deployment's .env.app.
+//
+// Nothing is restarted: unlike the domains list, which rewrites Caddy labels and so
+// has to recreate containers to mean anything, .env.app is read by appenv.Sync on
+// each app's next start. Recreating every container on the box because someone
+// edited a comment would be a poor trade, and the editor tells the operator the
+// change lands on next start instead. Config.AppEnv reads the file live, so the
+// next `docker compose up` picks this up with no CasaDash restart.
+func (s *Server) handlePutAppEnv(w http.ResponseWriter, r *http.Request) {
+	var in appEnvBody
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	if err := appenv.WriteRaw(s.cfg, []byte(in.Text)); err != nil {
+		// A validation failure is the operator's typo, not a server fault.
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, newAppEnvBody([]byte(in.Text)))
 }

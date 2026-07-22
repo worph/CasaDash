@@ -113,6 +113,37 @@ func ValidateVars(vars []Var) error {
 	return nil
 }
 
+// ValidateEnvFile rejects .env text CasaDash would read back differently from how
+// it was written. It backs the raw editors, where the operator types the file
+// itself rather than filling in fields.
+//
+// It is deliberately stricter than ParseEnvFile. Parsing is forgiving — it skips a
+// line it cannot read and takes the last of a duplicated key — which is right when
+// reading a file someone else wrote, and wrong when saving one someone is writing
+// now: a typo that silently does nothing is worse than a rejected save. Errors
+// carry a line number because that is what the editor can point at.
+func ValidateEnvFile(raw []byte) error {
+	seen := map[string]bool{}
+	for i, line := range strings.Split(string(raw), "\n") {
+		t := strings.TrimSpace(line)
+		if t == "" || strings.HasPrefix(t, "#") {
+			continue
+		}
+		k, _, ok := cutEnvLine(line)
+		if !ok {
+			return fmt.Errorf("line %d: %q is not KEY=VALUE — prefix it with # if it is a note", i+1, t)
+		}
+		if !keyRe.MatchString(k) {
+			return fmt.Errorf("line %d: invalid variable name %q: use letters, digits and _ (not starting with a digit)", i+1, k)
+		}
+		if seen[k] {
+			return fmt.Errorf("line %d: duplicate variable %q", i+1, k)
+		}
+		seen[k] = true
+	}
+	return nil
+}
+
 // cutEnvLine splits one .env line into key and value, reporting whether it holds
 // an entry at all (blanks and # comments do not).
 func cutEnvLine(line string) (key, value string, ok bool) {

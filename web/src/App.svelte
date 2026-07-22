@@ -5,12 +5,15 @@
   import SideBar from './lib/components/SideBar.svelte'
   import AppSection from './lib/components/AppSection.svelte'
   import StorePanel from './lib/components/store/StorePanel.svelte'
+  import SettingsPage from './lib/components/settings/SettingsPage.svelte'
   import AppSettingsModal from './lib/components/AppSettingsModal.svelte'
   import TipsModal from './lib/components/TipsModal.svelte'
   import UninstallDialog from './lib/components/UninstallDialog.svelte'
+  import { get } from 'svelte/store'
   import { live } from './lib/live/ws'
   import { subscribeSystem } from './lib/stores/system'
-  import { storeOpen, settingsApp, tipsApp, uninstallTarget } from './lib/stores/ui'
+  import { apps } from './lib/stores/apps'
+  import { storeOpen, settingsOpen, settingsApp, tipsApp, uninstallTarget } from './lib/stores/ui'
   import { openStore, start as startRouter } from './lib/route'
   import { loadSettings } from './lib/stores/settings'
 
@@ -18,6 +21,12 @@
     live.connect()
     loadSettings()
     const off = subscribeSystem()
+    // The launch page deep-links back here to open an app's Settings or Logs
+    // (?app=<id>&panel=logs|settings). Read it before startRouter(), which
+    // rewrites the URL to "/" and would drop the query.
+    const params = new URLSearchParams(location.search)
+    const deepApp = params.get('app')
+    const deepPanel = params.get('panel')
     // The path drives the store view (/store, /store/<app>); the older hash links
     // are still honoured once, at mount.
     const stopRouter = startRouter()
@@ -26,12 +35,31 @@
     else if (h.startsWith('#settings:')) {
       const id = h.slice('#settings:'.length)
       settingsApp.set({ id, name: id, managed: true })
+    } else if (deepApp && (deepPanel === 'logs' || deepPanel === 'settings')) {
+      openDeepLink(deepApp, deepPanel === 'logs' ? 'logs' : undefined)
     }
     return () => {
       stopRouter()
       off()
     }
   })
+
+  // Open an app's Settings modal from a launch-page deep-link. The app's real
+  // name/managed flag come from the live list; because that list loads
+  // asynchronously, we open best-effort now and refine once it arrives.
+  function openDeepLink(id: string, tab?: string) {
+    const cur = get(apps).find((a) => a.id === id)
+    settingsApp.set({ id, name: cur?.name ?? id, managed: cur?.managed ?? true, tab })
+    if (cur) return
+    const unsub = apps.subscribe((list) => {
+      const a = list.find((x) => x.id === id)
+      if (a) {
+        settingsApp.set({ id, name: a.name, managed: a.managed, tab })
+        unsub()
+      }
+    })
+    setTimeout(unsub, 5000)
+  }
 </script>
 
 <Wallpaper />
@@ -54,11 +82,16 @@
   <StorePanel />
 {/if}
 
+{#if $settingsOpen}
+  <SettingsPage />
+{/if}
+
 {#if $settingsApp}
   <AppSettingsModal
     id={$settingsApp.id}
     name={$settingsApp.name}
     managed={$settingsApp.managed}
+    initialTab={$settingsApp.tab}
     onclose={() => settingsApp.set(null)}
   />
 {/if}
